@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 向量库本地数据（运行时自动生成）
+chroma_db/
+
+# 环境变量与密钥
+.env
+
+# IDE
+.idea/
+.vscode/
