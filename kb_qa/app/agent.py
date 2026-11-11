@@ -51,6 +51,8 @@ REACT_PROMPT = """你是一个知识库问答助手，你有两个工具：
 
 重要: "观察"内容由系统填写，你不要自己编造"观察:"。
 
+检索参考（已结合上下文改写，行动输入应与其保持一致）: {search_query}
+
 历史对话:
 {chat_history}
 
@@ -60,12 +62,36 @@ REACT_PROMPT = """你是一个知识库问答助手，你有两个工具：
 
 class AgentState(TypedDict):
     question:str
+    search_query:str
     chat_history:str
     scratchpad:str
     action:str
     action_input:str
     steps:int
     answer:str
+
+# ===== 优化1：查询改写 =====
+# 多轮对话的痛点："那要带什么材料"直接拿去检索效果差。
+# 先让 LLM 结合历史把追问改写成独立问题，再让 Agent 拿它去检索。
+REWRITE_PROMPT = """根据历史对话，把用户的最新问题改写成一个不依赖上下文、可以直接拿去知识库检索的独立问题。只输出改写后的问题，不要解释。
+
+历史对话:
+{chat_history}
+
+最新问题: {question}
+
+独立问题:"""
+
+
+def rewrite_question(question, chat_history):
+    """首轮不改写；有历史时改写，失败则退回原问题。"""
+    if not chat_history:
+        return question
+    try:
+        out = llm.invoke(REWRITE_PROMPT.format(chat_history=chat_history, question=question))
+        return out.content.strip() or question
+    except Exception:
+        return question
 
 def extract(text,pattern):
     m = re.search(pattern,text)
@@ -79,6 +105,7 @@ def agent_node(state:AgentState):
 
     prompt = REACT_PROMPT.format(
         question=state["question"],
+        search_query=state.get("search_query", "") or state["question"],
         chat_history = state.get("chat_history",""),
         scratchpad = state["scratchpad"]
     )
@@ -139,19 +166,62 @@ memory = MemorySaver()
 graph =builder.compile(checkpointer=memory)
 
 def chat(question,thread_id):
-    """每轮重置本轮字段，保留 chat_history，实现多轮记忆。"""
+    """每轮重置本轮字段，保留 chat_history，实现多轮记忆。追问先改写再入库检索。"""
+    config = {"configurable":{"thread_id":thread_id}}
+    prev = graph.get_state(config).values or {}
+    history = prev.get("chat_history","") or ""
+    rewritten = rewrite_question(question, history)
     result = graph.invoke(
         {
             "answer":"",
             "question":question,
+            "search_query":rewritten,
             "scratchpad":"",
             "action":"",
             "action_input":"",
             "steps":0
         },
-        config = {"configurable":{"thread_id":thread_id}}
+        config = config
     )
     return result["answer"]
+
+
+def extract_final(raw):
+    """从流式拼出的全文里截取"最终答案:"之后的部分（给 qa_history 存干净答案用）。"""
+    if "最终答案" in raw:
+        return re.split(r"最终答案[:：]", raw)[-1].strip()
+    return raw.strip()
+
+
+def chat_stream(question, thread_id):
+    """流式版 chat：逐段产出模型的原始 ReAct 输出，前端按"最终答案:"切分显示。
+    思考/行动也实时流出——演示时能看到 Agent 的推理过程。"""
+    config = {"configurable":{"thread_id":thread_id}}
+    prev = graph.get_state(config).values or {}
+    history = prev.get("chat_history","") or ""
+    rewritten = rewrite_question(question, history)
+    for msg, _meta in graph.stream(
+        {
+            "answer":"",
+            "question":question,
+            "search_query":rewritten,
+            "scratchpad":"",
+            "action":"",
+            "action_input":"",
+            "steps":0
+        },
+        config = config,
+        stream_mode = "messages",
+    ):
+        # 只放行模型的文字 token（跳过工具消息和空块）
+        if type(msg).__name__ in ("AIMessageChunk", "AIMessage"):
+            content = msg.content
+            if isinstance(content, str) and content:
+                yield content
+            elif isinstance(content, list):
+                text = "".join(part.get("text","") for part in content if isinstance(part, dict))
+                if text:
+                    yield text
 
 if __name__ == "__main__":
     print(chat("校园卡丢了怎么补办？", "t1"))

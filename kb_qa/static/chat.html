@@ -78,17 +78,69 @@ async function send() {
   if (!q) return;
   addBubble(q, "user");
   qEl.value = "";
-  addBubble("思考中...", "bot");
 
-  const r = await fetch("/chat", {
+  // 两个气泡：思考过程（灰色小字，实时滚动）+ 最终答案
+  const think = document.createElement("div");
+  think.className = "bubble bot";
+  think.style.cssText = "background:#f8f9fb;color:#889;font-size:12px";
+  think.textContent = "思考中...";
+  chatEl.appendChild(think);
+  const answer = document.createElement("div");
+  answer.className = "bubble bot";
+  answer.style.display = "none";
+  chatEl.appendChild(answer);
+
+  const r = await fetch("/chat/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question: q, session_id: sessionId }),
   });
-  const data = await r.json();
 
-  // 把"思考中..."气泡替换成真答案
-  chatEl.lastChild.textContent = r.status === 200 ? data.answer : (data.detail?.[0]?.msg || "请求失败");
+  if (!r.ok || !r.body) {
+    // 流式失败 → 退回普通接口
+    const data = await (r.json ? r.json() : {});
+    chatEl.removeChild(think);
+    answer.style.display = "";
+    answer.textContent = data.detail?.[0]?.msg || data.detail || "请求失败";
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return;
+  }
+
+  // 逐段读取 SSE 流：data: {...}\n\n
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "", raw = "", inAnswer = false;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop();  // 最后一段可能不完整，留到下一轮
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const payload = line.slice(6);
+      if (payload === "[DONE]") continue;
+      raw += JSON.parse(payload).text;
+      const idx = raw.indexOf("最终答案");
+      if (idx === -1) {
+        think.textContent = raw.trim() || "思考中...";
+      } else {
+        // 看到"最终答案:" → 思考过程收起，答案气泡开始打字机
+        if (!inAnswer) {
+          inAnswer = true;
+          think.textContent = raw.slice(0, idx).trim() || "（无思考过程）";
+          answer.style.display = "";
+        }
+        answer.textContent = raw.slice(idx).replace(/^最终答案[:：]/, "").trim();
+      }
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+  }
+  if (!inAnswer) {  // 没等到"最终答案"标记（如报错文案），原样展示
+    think.remove();
+    answer.style.display = "";
+    answer.textContent = raw.trim() || "请求失败";
+  }
   chatEl.scrollTop = chatEl.scrollHeight;
 }
 </script>

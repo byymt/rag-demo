@@ -68,11 +68,19 @@ def init_db():
             cur.execute(sql)
     conn.close()
 
-    # qa_history 表如果是在加"来源"列之前建的，补一列（列已存在会报 1060，忽略）
+    # 旧表补列（列已存在会报 1060，忽略）
     try:
         conn = get_conn()
         with conn.cursor() as cur:
             cur.execute("ALTER TABLE qa_history ADD COLUMN source_doc TEXT")
+        conn.close()
+    except pymysql.err.OperationalError:
+        pass
+    # 文件哈希列：重复上传检测用（优化5）
+    try:
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE documents ADD COLUMN file_hash VARCHAR(64)")
         conn.close()
     except pymysql.err.OperationalError:
         pass
@@ -108,17 +116,27 @@ def get_user_by_username(username):
 
 # ===== documents 表操作 =====
 
-def add_document(filename, uploader, chunks, chroma_ids):
+def add_document(filename, uploader, chunks, chroma_ids, file_hash=""):
     """插入一行文档记录，返回自增 id。chroma_ids 是列表，存成 JSON 字符串。"""
     conn = get_conn()
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO documents (filename, uploader, chunks, chroma_ids) VALUES (%s, %s, %s, %s)",
-            (filename, uploader, chunks, json.dumps(list(chroma_ids))),
+            "INSERT INTO documents (filename, uploader, chunks, chroma_ids, file_hash) VALUES (%s, %s, %s, %s, %s)",
+            (filename, uploader, chunks, json.dumps(list(chroma_ids)), file_hash),
         )
         doc_id = cur.lastrowid
     conn.close()
     return doc_id
+
+
+def get_document_by_hash(file_hash):
+    """按文件哈希查文档，命中返回该行（重复上传检测用），没有返回 None。"""
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, filename FROM documents WHERE file_hash = %s", (file_hash,))
+        row = cur.fetchone()
+    conn.close()
+    return row
 
 
 def list_documents():

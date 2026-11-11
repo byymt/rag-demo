@@ -7,6 +7,7 @@
     - 聊天页面:  http://127.0.0.1:8000/ui
     - 接口文档:  http://127.0.0.1:8000/docs （FastAPI 自带，可以直接点按钮测接口）
 """
+import hashlib
 import json
 import os
 import shutil
@@ -15,6 +16,7 @@ import uuid
 import gradio as gr
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -88,6 +90,26 @@ def chat_api(req: ChatRequest) -> ChatResponse:
     return ChatResponse(answer=answer)
 
 
+# ---- 接口1b：POST /chat/stream 流式问答（SSE，前端打字机效果） ----
+
+@api.post("/chat/stream")
+def chat_stream_api(req: ChatRequest) -> StreamingResponse:
+    """逐段推送 Agent 的原始 ReAct 输出（思考/行动/最终答案）。
+    前端按"最终答案:"切分：之前的是思考过程，之后的进答案气泡。"""
+    kb.last_sources = []
+
+    def gen():
+        raw = ""
+        for chunk in agent.chat_stream(req.question, req.session_id):
+            raw += chunk
+            yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+        # 流结束：把干净答案 + 命中来源写进 MySQL（互动看板用）
+        db.add_qa_record(req.session_id, req.question, agent.extract_final(raw), json.dumps(kb.last_sources))
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 # ---- 接口5：GET /kb/stats 互动看板 ----
 
 @api.get("/kb/stats")
@@ -117,14 +139,22 @@ def upload_api(request: Request, file: UploadFile = File(...)) -> dict:
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
+    # 2b. 优化5：按文件内容哈希去重——同一个文件传两遍会产生双倍切片、检索结果重复
+    with open(save_path, "rb") as f:
+        file_hash = hashlib.sha256(f.read()).hexdigest()
+    dup = db.get_document_by_hash(file_hash)
+    if dup is not None:
+        os.remove(save_path)  # 拒收，刚才落地的临时文件也删掉
+        raise HTTPException(status_code=400, detail=f"该文件已上传过（《{dup['filename']}》，编号 {dup['id']}），请勿重复上传")
+
     # 3. 入向量库；失败返回 500（服务器内部错误）
     try:
         ids = kb.add_file_to_kb(save_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"入库失败: {e}")
 
-    # 4. 记入 MySQL（谁传的、切了几片、Chroma 切片 id 是什么）
-    doc_id = db.add_document(file.filename, username, len(ids), ids)
+    # 4. 记入 MySQL（谁传的、切了几片、Chroma 切片 id 是什么、内容哈希）
+    doc_id = db.add_document(file.filename, username, len(ids), ids, file_hash)
 
     return {"filename": file.filename, "chunks": len(ids), "doc_id": doc_id}
 
@@ -167,7 +197,7 @@ def delete_doc_api(doc_id: int, request: Request) -> dict:
 
 
 def gradio_upload(file) -> str:
-    """网页上传回调：拿到文件路径，调入库，返回状态文字。"""
+    """网页上传回调：拿到文件路径，去重检查 + 调入库，返回状态文字。"""
     if file is None:
         return "请先选择文件"
     if isinstance(file, str):
@@ -176,9 +206,14 @@ def gradio_upload(file) -> str:
         path = file.get("path") or file.get("name")
     else:
         path = file.name  # 兼容不同 gradio 版本的返回格式
+    with open(path, "rb") as f:
+        file_hash = hashlib.sha256(f.read()).hexdigest()
+    dup = db.get_document_by_hash(file_hash)
+    if dup is not None:
+        return f"该文件已上传过（《{dup['filename']}》），请勿重复上传"
     try:
         ids = kb.add_file_to_kb(path)
-        db.add_document(os.path.basename(path), "gradio_demo", len(ids), ids)
+        db.add_document(os.path.basename(path), "gradio_demo", len(ids), ids, file_hash)
         return f"《{os.path.basename(path)}》已入库，切了 {len(ids)} 片"
     except Exception as e:
         return f"入库失败: {e}"
