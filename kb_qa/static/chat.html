@@ -47,9 +47,18 @@
 if (!localStorage.getItem("kb_token")) location.href = "index.html";
 
 // 会话编号：一个标签页一份，实现多轮记忆
+// 注意：crypto.randomUUID 只在 HTTPS/localhost 下可用，
+// 服务器用 http://IP 访问时不存在，所以要带降级方案
+function makeSessionId() {
+  if (window.crypto && crypto.randomUUID) {
+    return crypto.randomUUID().replaceAll("-", "");
+  }
+  return "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
 let sessionId = localStorage.getItem("kb_session");
 if (!sessionId) {
-  sessionId = crypto.randomUUID().replaceAll("-", "");
+  sessionId = makeSessionId();
   localStorage.setItem("kb_session", sessionId);
 }
 
