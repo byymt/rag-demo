@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kb_qa 文档管理</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Microsoft YaHei", sans-serif; background: #f0f2f5; padding: 20px; }
+  .wrap { max-width: 800px; margin: 0 auto; }
+  .nav { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .nav h1 { font-size: 18px; flex: 1; }
+  .nav a { color: #4a7cff; text-decoration: none; font-size: 14px; }
+  .card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 16px;
+          box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+  .upload-row { display: flex; gap: 10px; }
+  .upload-row input[type=file] { flex: 1; font-size: 13px; }
+  button { padding: 8px 16px; border: none; border-radius: 6px;
+           background: #4a7cff; color: #fff; font-size: 13px; cursor: pointer; }
+  button:hover { background: #3565e0; }
+  button.del { background: #e04848; padding: 4px 10px; }
+  button.del:hover { background: #c23a3a; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px; border-bottom: 1px solid #eee; text-align: left; }
+  th { color: #666; }
+  .msg { font-size: 13px; margin-top: 10px; }
+  .ok { color: #2eaa5e; } .err { color: #e04848; }
+  .empty { color: #999; text-align: center; padding: 16px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="nav">
+      <h1>📁 文档管理</h1>
+      <span id="who" style="font-size:14px;color:#555"></span>
+      <a href="chat.html">去提问 →</a>
+      <a href="#" onclick="logout()">退出</a>
+    </div>
+
+    <div class="card">
+      <div class="upload-row">
+        <input type="file" id="file" accept=".pdf,.txt,.md">
+        <button onclick="doUpload()">上传入库</button>
+      </div>
+      <p class="msg" id="up-msg"></p>
+    </div>
+
+    <div class="card">
+      <table>
+        <thead><tr><th>ID</th><th>文件名</th><th>上传者</th><th>切片</th><th>时间</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p class="empty" id="empty" hidden>还没有文档，先上传一个</p>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-bottom:10px;font-size:15px">🔥 互动看板（别人提问会实时反映到这里）</h3>
+      <table>
+        <thead><tr><th>文档</th><th>上传者</th><th>被问次数</th><th>最近一次问题</th></tr></thead>
+        <tbody id="stat-rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+const me = localStorage.getItem("kb_user");
+if (!localStorage.getItem("kb_token")) location.href = "index.html";  // 没登录踢回登录页
+document.getElementById("who").textContent = "当前用户：" + me;
+
+function headers() { return { "X-Token": localStorage.getItem("kb_token") }; }
+
+async function load() {
+  const r = await fetch("/kb/docs");
+  const data = await r.json();
+  const tbody = document.getElementById("rows");
+  tbody.innerHTML = "";
+  const docs = data.documents || [];
+  document.getElementById("empty").hidden = docs.length > 0;
+  for (const d of docs) {
+    const tr = document.createElement("tr");
+    // 只有自己传的文档才显示删除按钮（后端也会再拦一次）
+    const delBtn = d.uploader === me
+      ? `<button class="del" onclick="doDelete(${d.id})">删除</button>` : "";
+    tr.innerHTML = `<td>${d.id}</td><td>${d.filename}</td><td>${d.uploader}</td>
+                    <td>${d.chunks}</td><td>${d.created_at.slice(0, 19).replace("T", " ")}</td>
+                    <td>${delBtn}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+async function doUpload() {
+  const f = document.getElementById("file").files[0];
+  if (!f) { showMsg("up-msg", "请先选择文件", false); return; }
+  const fd = new FormData();
+  fd.append("file", f);
+  const r = await fetch("/kb/upload", { method: "POST", headers: headers(), body: fd });
+  const data = await r.json();
+  if (r.status === 200) {
+    showMsg("up-msg", `《${data.filename}》入库成功，切了 ${data.chunks} 片`, true);
+    load();
+  } else {
+    showMsg("up-msg", data.detail || "上传失败", false);
+  }
+}
+
+async function doDelete(id) {
+  if (!confirm(`确定删除文档 ${id} 吗？`)) return;
+  const r = await fetch(`/kb/docs/${id}`, { method: "DELETE", headers: headers() });
+  const data = await r.json();
+  if (r.status !== 200) { alert(data.detail || "删除失败"); return; }
+  load();
+}
+
+function showMsg(id, text, ok) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = "msg " + (ok ? "ok" : "err");
+}
+
+// 互动看板：读 /kb/stats，展示每个文档被问次数和最近问题
+async function loadStats() {
+  const r = await fetch("/kb/stats");
+  const data = await r.json();
+  const tbody = document.getElementById("stat-rows");
+  tbody.innerHTML = "";
+  const stats = data.stats || [];
+  if (!stats.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">还没有数据</td></tr>';
+    return;
+  }
+  for (const s of stats) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${s.filename}</td><td>${s.uploader}</td><td>${s.asks}</td>
+                    <td>${s.last_question || "—"}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+function logout() {
+  localStorage.removeItem("kb_token");
+  location.href = "index.html";
+}
+
+load();
+loadStats();
+</script>
+</body>
+</html>

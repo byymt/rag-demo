@@ -29,8 +29,12 @@ load_dotenv()
 @tool
 def get_weather(city:str)->str:
     """描述指定城市的实时天气情况，返回天气描述和温度"""
-    resp = requests.get(f"https://wttr.in/{city}?format=j1",timeout=10)
-    data = resp.json()
+    try:
+        resp = requests.get(f"https://wttr.in/{city}?format=j1",timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        return f"天气服务暂时不可用（{type(e).__name__}），无法查询{city}的天气"
     current = data["current_condition"][0]
     desc = current["weatherDesc"][0]["value"]
     temp = current["temp_C"]

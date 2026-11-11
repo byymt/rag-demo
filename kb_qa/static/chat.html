@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kb_qa 提问</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Microsoft YaHei", sans-serif; background: #f0f2f5; padding: 20px; }
+  .wrap { max-width: 700px; margin: 0 auto; display: flex; flex-direction: column;
+          height: calc(100vh - 40px); }
+  .nav { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .nav h1 { font-size: 18px; flex: 1; }
+  .nav a { color: #4a7cff; text-decoration: none; font-size: 14px; }
+  #chat { flex: 1; overflow-y: auto; background: #fff; border-radius: 12px;
+          padding: 16px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+  .bubble { max-width: 85%; padding: 10px 14px; border-radius: 10px;
+            margin-bottom: 10px; font-size: 14px; white-space: pre-wrap; line-height: 1.6; }
+  .user { background: #4a7cff; color: #fff; margin-left: auto; }
+  .bot { background: #f1f3f7; color: #333; }
+  .input-row { display: flex; gap: 10px; margin-top: 12px; }
+  #q { flex: 1; padding: 10px; border: 1px solid #d9d9d9; border-radius: 6px; font-size: 14px; }
+  button { padding: 10px 20px; border: none; border-radius: 6px;
+           background: #4a7cff; color: #fff; font-size: 14px; cursor: pointer; }
+  .tip { color: #999; font-size: 12px; text-align: center; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="nav">
+      <h1>💬 知识库提问</h1>
+      <a href="docs.html">← 文档管理</a>
+    </div>
+
+    <div id="chat">
+      <div class="bubble bot">你好！答案只基于已上传的文档。没有资料时我会明确告诉你。</div>
+    </div>
+
+    <div class="input-row">
+      <input id="q" placeholder="输入问题，回车发送..." onkeydown="if(event.key==='Enter')send()">
+      <button onclick="send()">发送</button>
+    </div>
+    <p class="tip">每个浏览器标签页是独立会话，支持多轮追问</p>
+  </div>
+
+<script>
+if (!localStorage.getItem("kb_token")) location.href = "index.html";
+
+// 会话编号：一个标签页一份，实现多轮记忆
+let sessionId = localStorage.getItem("kb_session");
+if (!sessionId) {
+  sessionId = crypto.randomUUID().replaceAll("-", "");
+  localStorage.setItem("kb_session", sessionId);
+}
+
+const chatEl = document.getElementById("chat");
+const qEl = document.getElementById("q");
+
+function addBubble(text, who) {
+  const div = document.createElement("div");
+  div.className = "bubble " + who;
+  div.textContent = text;
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+async function send() {
+  const q = qEl.value.trim();
+  if (!q) return;
+  addBubble(q, "user");
+  qEl.value = "";
+  addBubble("思考中...", "bot");
+
+  const r = await fetch("/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question: q, session_id: sessionId }),
+  });
+  const data = await r.json();
+
+  // 把"思考中..."气泡替换成真答案
+  chatEl.lastChild.textContent = r.status === 200 ? data.answer : (data.detail?.[0]?.msg || "请求失败");
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+</script>
+</body>
+</html>

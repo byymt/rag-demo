@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kb_qa 登录</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Microsoft YaHei", sans-serif; background: #f0f2f5;
+         display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+  .card { background: #fff; border-radius: 12px; padding: 32px; width: 340px;
+          box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+  h1 { font-size: 20px; text-align: center; margin-bottom: 24px; }
+  h2 { font-size: 15px; color: #555; margin-bottom: 10px; }
+  input { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #d9d9d9;
+          border-radius: 6px; font-size: 14px; }
+  input:focus { outline: none; border-color: #4a7cff; }
+  button { width: 100%; padding: 10px; border: none; border-radius: 6px;
+           background: #4a7cff; color: #fff; font-size: 14px; cursor: pointer; }
+  button:hover { background: #3565e0; }
+  hr { border: none; border-top: 1px solid #eee; margin: 20px 0; }
+  .msg { font-size: 13px; min-height: 16px; margin-top: 6px; }
+  .ok { color: #2eaa5e; } .err { color: #e04848; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>📚 知识库问答平台</h1>
+
+    <h2>登录</h2>
+    <input id="login-user" placeholder="用户名">
+    <input id="login-pass" type="password" placeholder="密码">
+    <button onclick="doLogin()">登录</button>
+    <p class="msg err" id="login-msg"></p>
+
+    <hr>
+
+    <h2>没有账号？注册</h2>
+    <input id="reg-user" placeholder="用户名">
+    <input id="reg-pass" type="password" placeholder="密码（至少 6 位）">
+    <button onclick="doRegister()">注册</button>
+    <p class="msg ok" id="reg-msg"></p>
+  </div>
+
+<script>
+async function post(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: r.status, data: await r.json() };
+}
+function val(id) { return document.getElementById(id).value.trim(); }
+function show(id, text, ok) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = "msg " + (ok ? "ok" : "err");
+}
+
+async function doRegister() {
+  const { status, data } = await post("/register",
+      { username: val("reg-user"), password: val("reg-pass") });
+  show("reg-msg", status === 200 ? data.message : data.detail, status === 200);
+}
+
+async function doLogin() {
+  const { status, data } = await post("/login",
+      { username: val("login-user"), password: val("login-pass") });
+  if (status === 200) {
+    localStorage.setItem("kb_token", data.token);   // 之后每个请求都带它
+    localStorage.setItem("kb_user", data.username);
+    location.href = "docs.html";
+  } else {
+    show("login-msg", data.detail, false);
+  }
+}
+</script>
+</body>
+</html>

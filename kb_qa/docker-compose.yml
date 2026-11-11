@@ -1,0 +1,39 @@
+# kb_qa 编排：一条命令 docker compose up -d --build 启动两个容器（应用 + MySQL）
+services:
+  kb-qa:
+    build: .
+    container_name: kb-qa
+    ports:
+      - "8000:8000"          # 宿主机8000 → 容器8000
+    env_file:
+      - .env                 # 密钥从 .env 注入环境变量，不写死在任何文件里
+    environment:
+      MYSQL_HOST: mysql      # 容器里连 MySQL 用服务名"mysql"，不用 IP（compose 内部网络自动解析）
+    volumes:
+      - ./chroma_db:/app/chroma_db   # 向量库挂到宿主机，容器重建数据不丢
+      - ./uploads:/app/uploads       # 上传文件同理
+    depends_on:
+      mysql:
+        condition: service_healthy   # 等 MySQL 真正可用才启动应用
+    restart: unless-stopped         # 服务器重启后容器自动拉起
+
+  mysql:
+    image: mysql:8
+    container_name: kb-mysql
+    env_file:
+      - .env               # MYSQL_ROOT_PASSWORD / MYSQL_USER / MYSQL_PASSWORD 从这里来
+    environment:
+      MYSQL_DATABASE: kb_qa   # 容器首次启动自动建库 kb_qa，并自动创建 .env 里指定的用户
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql  # 数据库文件挂宿主机，容器重建数据不丢
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  mysql_data:

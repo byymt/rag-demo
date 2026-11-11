@@ -6,9 +6,21 @@ venv/
 
 # 向量库本地数据（运行时自动生成）
 chroma_db/
+chroma/
+chroma_langchain_db/
+
+# Trae 临时产物
+.trae-html-share-packages/
+
+# 上传的用户文件（运行时自动生成）
+uploads/
 
 # 环境变量与密钥
 .env
+
+# 部署打包产物（含 .env，绝不进仓库）
+kb_qa_deploy.zip
+deploy_staging/
 
 # IDE
 .idea/

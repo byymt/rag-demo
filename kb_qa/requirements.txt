@@ -1,0 +1,17 @@
+# kb_qa 依赖清单（版本来自实际开发环境，pip install -r requirements.txt 可复现）
+langchain==0.3.27
+langchain-community==0.3.31
+langchain-openai==0.3.30
+langchain-text-splitters==0.3.11
+langchain-chroma==0.2.6
+langgraph==0.2.76
+dashscope==1.27.6
+chromadb==1.5.9
+pypdf==6.18.1
+fastapi==0.141.1
+uvicorn==0.52.4
+gradio==6.31.0
+python-multipart==0.0.32
+python-dotenv==1.2.3
+pydantic==2.13.5
+pymysql==1.2.4
