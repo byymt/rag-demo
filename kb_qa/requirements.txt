@@ -17,3 +17,5 @@ pydantic==2.13.5
 pymysql==1.2.4
 rank_bm25==0.2.2
 jieba==0.42.1
+docx2txt==0.9
+python-pptx==1.0.2

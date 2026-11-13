@@ -1,7 +1,8 @@
 """知识库模块：读文件、切片、入库、检索——知识库的一切操作都从这里走。"""
 import os
 
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
+from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import DashScopeEmbeddings
 from langchain_chroma import Chroma
@@ -25,15 +26,33 @@ vectorstore = Chroma(
 
 
 # ===== 函数1：读单个文件（上传接口以后会传一个路径进来）=====
+def _load_pptx(path):
+    """提取 PPTX 每页文字。选 python-pptx 而不是 langchain 的
+    UnstructuredPowerPointLoader：后者依赖重量级 unstructured 库，安装慢且
+    Windows 上易出问题；提取文字这一件事用 python-pptx 十几行就够了。"""
+    from pptx import Presentation
+    prs = Presentation(path)
+    docs = []
+    for i, slide in enumerate(prs.slides, 1):
+        texts = [shape.text for shape in slide.shapes if shape.has_text_frame and shape.text.strip()]
+        if texts:
+            docs.append(Document(page_content="\n".join(texts), metadata={"source": path, "page": i}))
+    return docs
+
+
 def load_any_file(path):
     """按扩展名选 loader，返回文档列表。"""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
         loader = PyPDFLoader(path)
+    elif ext == ".docx":
+        loader = Docx2txtLoader(path)
+    elif ext == ".pptx":
+        return _load_pptx(path)
     elif ext in (".txt", ".md"):
         loader = TextLoader(path, encoding="utf-8")
     else:
-        raise ValueError(f"不支持的文件类型: {ext}")
+        raise ValueError(f"不支持的文件类型: {ext}（支持 pdf/docx/pptx/txt/md）")
     return loader.load()
 
 

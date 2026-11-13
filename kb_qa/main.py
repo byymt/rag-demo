@@ -120,7 +120,7 @@ def stats_api() -> dict:
 
 # ---- 接口2：POST /kb/upload 上传入库 ----
 
-ALLOWED_EXTS = (".pdf", ".txt", ".md")
+ALLOWED_EXTS = (".pdf", ".txt", ".md", ".docx", ".pptx")
 
 
 @api.post("/kb/upload")
