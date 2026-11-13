@@ -69,6 +69,10 @@ document.getElementById("who").textContent = "当前用户：" + me;
 
 function headers() { return { "X-Token": localStorage.getItem("kb_token") }; }
 
+// HTML 转义：文件名/用户名/问题都来自用户输入，直接拼 innerHTML 会被注入脚本（XSS）
+const esc = (s) => String(s).replace(/[&<>"']/g,
+  (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+
 async function load() {
   const r = await fetch("/kb/docs");
   const data = await r.json();
@@ -81,7 +85,7 @@ async function load() {
     // 只有自己传的文档才显示删除按钮（后端也会再拦一次）
     const delBtn = d.uploader === me
       ? `<button class="del" onclick="doDelete(${d.id})">删除</button>` : "";
-    tr.innerHTML = `<td>${d.id}</td><td>${d.filename}</td><td>${d.uploader}</td>
+    tr.innerHTML = `<td>${d.id}</td><td>${esc(d.filename)}</td><td>${esc(d.uploader)}</td>
                     <td>${d.chunks}</td><td>${d.created_at.slice(0, 19).replace("T", " ")}</td>
                     <td>${delBtn}</td>`;
     tbody.appendChild(tr);
@@ -130,8 +134,8 @@ async function loadStats() {
   }
   for (const s of stats) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${s.filename}</td><td>${s.uploader}</td><td>${s.asks}</td>
-                    <td>${s.last_question || "—"}</td>`;
+    tr.innerHTML = `<td>${esc(s.filename)}</td><td>${esc(s.uploader)}</td><td>${s.asks}</td>
+                    <td>${esc(s.last_question || "—")}</td>`;
     tbody.appendChild(tr);
   }
 }

@@ -143,11 +143,16 @@ def upload_api(request: Request, file: UploadFile = File(...)) -> dict:
     # 1. 先检查扩展名，不对直接拒绝（400 = 客户端参数错误）
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in ALLOWED_EXTS:
-        raise HTTPException(status_code=400, detail=f"不支持的文件类型: {ext}，只支持 pdf/txt/md")
+        raise HTTPException(status_code=400, detail=f"不支持的文件类型: {ext}，只支持 pdf/docx/pptx/txt/md")
+
+    # 1b. 文件名消毒：只留纯文件名（防路径穿越），过长的截断（防文件系统报错）
+    safe_name = file.filename.replace("\\", "/").split("/")[-1].strip()
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="文件名不合法")
 
     # 2. 把上传的文件保存到 uploads/ 目录（uploads 目录不存在就创建）
     os.makedirs(UPLOADS_DIR, exist_ok=True)
-    save_path = os.path.join(UPLOADS_DIR, file.filename)
+    save_path = os.path.join(UPLOADS_DIR, safe_name)
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
@@ -165,10 +170,11 @@ def upload_api(request: Request, file: UploadFile = File(...)) -> dict:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"入库失败: {e}")
 
-    # 4. 记入 MySQL（谁传的、切了几片、Chroma 切片 id 是什么、内容哈希）
-    doc_id = db.add_document(file.filename, username, len(ids), ids, file_hash)
+    # 4. 记入 MySQL（谁传的、切了几片、Chroma 切片 id 是什么、内容哈希）——
+    #    存消毒后的文件名，页面渲染和磁盘文件保持一致
+    doc_id = db.add_document(safe_name, username, len(ids), ids, file_hash)
 
-    return {"filename": file.filename, "chunks": len(ids), "doc_id": doc_id}
+    return {"filename": safe_name, "chunks": len(ids), "doc_id": doc_id}
 
 
 # ---- 接口3：GET /kb/docs 文档列表 ----
