@@ -91,9 +91,11 @@ def search(query):
         return "没有检索到相关资料"
     parts = []
     for i, doc in enumerate(docs, 1):
-        source = os.path.basename(doc.metadata.get("source", "未知来源"))
-        last_sources.append(source)
-        parts.append(f"[{i}] 来源:{source}\n{doc.page_content}")
+        name = os.path.basename(doc.metadata.get("source", "未知来源"))
+        page = doc.metadata.get("page")  # pptx/pdf 切片带页码，md/txt 没有
+        loc = f"{name}(第{page}页)" if page else name
+        last_sources.append({"name": name, "page": page})
+        parts.append(f"[{i}] 来源:{loc}\n{doc.page_content}")
     return "\n\n".join(parts)
 
 

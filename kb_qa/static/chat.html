@@ -109,7 +109,7 @@ async function send() {
   // 逐段读取 SSE 流：data: {...}\n\n
   const reader = r.body.getReader();
   const decoder = new TextDecoder();
-  let buf = "", raw = "", inAnswer = false;
+  let buf = "", raw = "", inAnswer = false, sources = null;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -120,7 +120,9 @@ async function send() {
       if (!line.startsWith("data: ")) continue;
       const payload = line.slice(6);
       if (payload === "[DONE]") continue;
-      raw += JSON.parse(payload).text;
+      const obj = JSON.parse(payload);
+      if (obj.sources) { sources = obj.sources; continue; }  // 引用来源事件，流末尾才到
+      raw += obj.text;
       const idx = raw.indexOf("最终答案");
       if (idx === -1) {
         think.textContent = raw.trim() || "思考中...";
@@ -140,6 +142,14 @@ async function send() {
     think.remove();
     answer.style.display = "";
     answer.textContent = raw.trim() || "请求失败";
+  }
+  if (sources && sources.length) {  // 引用溯源：回答下方列出命中的课件片段
+    const cite = document.createElement("div");
+    cite.style.cssText = "font-size:12px;color:#888;margin-top:6px;line-height:1.6;";
+    cite.textContent = "引用来源：" + sources.map(
+      (s, i) => `[${i + 1}] ${s.name}${s.page ? "(第" + s.page + "页)" : ""}`
+    ).join("　");
+    answer.after(cite);
   }
   chatEl.scrollTop = chatEl.scrollHeight;
 }

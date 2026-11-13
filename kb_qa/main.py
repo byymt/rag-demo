@@ -78,6 +78,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """响应的数据合同：后端保证按这个格式回 JSON。"""
     answer: str
+    sources: list = []  # 引用来源：[{"name": 文件名, "page": 页码或None}]
 
 
 @api.post("/chat", response_model=ChatResponse)
@@ -87,7 +88,7 @@ def chat_api(req: ChatRequest) -> ChatResponse:
     answer = agent.chat(req.question, req.session_id)
     # 写入 MySQL：问题、答案、命中了哪些文档（互动看板靠它统计）
     db.add_qa_record(req.session_id, req.question, answer, json.dumps(kb.last_sources))
-    return ChatResponse(answer=answer)
+    return ChatResponse(answer=answer, sources=kb.last_sources)
 
 
 # ---- 接口1b：POST /chat/stream 流式问答（SSE，前端打字机效果） ----
@@ -103,8 +104,10 @@ def chat_stream_api(req: ChatRequest) -> StreamingResponse:
         for chunk in agent.chat_stream(req.question, req.session_id):
             raw += chunk
             yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
-        # 流结束：把干净答案 + 命中来源写进 MySQL（互动看板用）
+        # 流结束：把干净答案 + 命中来源写进 MySQL（互动看板用）；
+        # 来源列表单独推一个事件给前端渲染"引用来源"区块
         db.add_qa_record(req.session_id, req.question, agent.extract_final(raw), json.dumps(kb.last_sources))
+        yield f"data: {json.dumps({'sources': kb.last_sources}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
