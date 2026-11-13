@@ -1,5 +1,6 @@
 """知识库模块：读文件、切片、入库、检索——知识库的一切操作都从这里走。"""
 import os
+import re
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain_core.documents import Document
@@ -127,6 +128,21 @@ def _get_bm25():
     return _bm25, _bm25_ids, _bm25_docs
 
 
+def _rewrite_query(query: str) -> str:
+    """短问法规则改写：课件写的是"类图的作用是…"，用户问的是"什么是类图"，
+    两种措辞咬合差（本地实测 BM25 0.95 vs 1.58，向量同理），导致定义型问题被
+    防幻觉阈值误杀。把问法改写成贴近课件原文的措辞，比调低阈值更安全——
+    阈值放松会伤库外拒答，改写只是让真问题更容易过门。"""
+    q = query.strip().rstrip("？?！!。. ")
+    m = re.fullmatch(r"什么是(.+)", q)
+    if m:
+        return f"{m.group(1)}的定义和作用"
+    m = re.fullmatch(r"(.+?)和(.+?)有什么区别", q)
+    if m:
+        return f"{m.group(1)}和{m.group(2)}的区别 比较"
+    return query
+
+
 def hybrid_search(query, k=RETRIEVER_K):
     """向量检索管"语义相近"，BM25 管"关键词精确命中"，两路结果用 RRF 融合排序取 top-k。
 
@@ -136,6 +152,7 @@ def hybrid_search(query, k=RETRIEVER_K):
     """
     candidates = {}  # chroma_id -> {"doc":..., "rrf":融合分}
     has_vec_hit = False
+    query = _rewrite_query(query)  # 定义型/对比型短问法先改写，再进两路检索
 
     # 第 1 路：向量检索（带分数）。Chroma 默认 L2 距离，越小越相似 → 相似度 = 1 - 距离
     vec_hits = vectorstore.similarity_search_with_score(query, k=VECTOR_K)
