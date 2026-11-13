@@ -1,0 +1,25 @@
+{
+  "说明": "kb_qa 指标测试集：in=库内问题（应答对，校验关键词），out=库外问题（应拒答）",
+  "questions": [
+    {"type": "in", "q": "大模型为什么会产生幻觉？怎么缓解？", "keywords": ["幻觉"]},
+    {"type": "in", "q": "RAG 的入库阶段包括哪些步骤？", "keywords": ["切片", "向量化"]},
+    {"type": "in", "q": "文档切片为什么要保留重叠（overlap）？", "keywords": ["边界"]},
+    {"type": "in", "q": "温度参数设置成 0 有什么作用？", "keywords": ["随机", "稳定"]},
+    {"type": "in", "q": "什么是 ReAct 范式？每一轮输出什么？", "keywords": ["行动"]},
+    {"type": "in", "q": "LangGraph 里多轮对话记忆是怎么实现的？", "keywords": ["thread_id", "MemorySaver"]},
+    {"type": "in", "q": "Function Calling 的调用流程是什么样的？", "keywords": ["工具"]},
+    {"type": "in", "q": "向量数据库在 RAG 中承担什么角色？", "keywords": ["相似"]},
+    {"type": "in", "q": "RAG 的查询阶段是怎么工作的？", "keywords": ["检索", "提示词"]},
+    {"type": "in", "q": "RAG 系统里拒答机制是怎么工作的？", "keywords": ["阈值", "拒答"]},
+    {"type": "out", "q": "珠穆朗玛峰有多高？"},
+    {"type": "out", "q": "《红楼梦》的作者是谁？"},
+    {"type": "out", "q": "红烧肉怎么做？"},
+    {"type": "out", "q": "福州市现在有多少人口？"},
+    {"type": "out", "q": "今天福州天气怎么样？"},
+    {"type": "out", "q": "C罗获得过几次金球奖？"},
+    {"type": "out", "q": "感冒了应该怎么治？"},
+    {"type": "out", "q": "地球到月球的距离是多少？"},
+    {"type": "out", "q": "比特币的挖矿原理是什么？"},
+    {"type": "out", "q": "高考满分是多少分？"}
+  ]
+}
