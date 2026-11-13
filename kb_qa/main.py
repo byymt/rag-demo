@@ -10,6 +10,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import uuid
 
@@ -81,6 +82,13 @@ class ChatResponse(BaseModel):
     sources: list = []  # 引用来源：[{"name": 文件名, "page": 页码或None}]
 
 
+def _cited_sources(answer: str) -> list:
+    """只有答案里真的出现了 [n] 角标才返回来源列表——
+    降级回答（通用知识兜底）时模型没引用资料，弱命中片段不该展示，
+    否则'红烧肉'下面挂'编写代码.pptx'就是误导。"""
+    return kb.last_sources if re.search(r"\[\d+\]", answer) else []
+
+
 @api.post("/chat", response_model=ChatResponse)
 def chat_api(req: ChatRequest) -> ChatResponse:
     """收问题 → 调 Agent → 回答案。session_id 区分不同用户的会话。"""
@@ -88,7 +96,7 @@ def chat_api(req: ChatRequest) -> ChatResponse:
     answer = agent.chat(req.question, req.session_id)
     # 写入 MySQL：问题、答案、命中了哪些文档（互动看板靠它统计）
     db.add_qa_record(req.session_id, req.question, answer, json.dumps(kb.last_sources))
-    return ChatResponse(answer=answer, sources=kb.last_sources)
+    return ChatResponse(answer=answer, sources=_cited_sources(answer))
 
 
 # ---- 接口1b：POST /chat/stream 流式问答（SSE，前端打字机效果） ----
@@ -105,9 +113,10 @@ def chat_stream_api(req: ChatRequest) -> StreamingResponse:
             raw += chunk
             yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
         # 流结束：把干净答案 + 命中来源写进 MySQL（互动看板用）；
-        # 来源列表单独推一个事件给前端渲染"引用来源"区块
-        db.add_qa_record(req.session_id, req.question, agent.extract_final(raw), json.dumps(kb.last_sources))
-        yield f"data: {json.dumps({'sources': kb.last_sources}, ensure_ascii=False)}\n\n"
+        # 来源列表单独推一个事件给前端渲染"引用来源"区块（仅当答案真有角标）
+        final_answer = agent.extract_final(raw)
+        db.add_qa_record(req.session_id, req.question, final_answer, json.dumps(kb.last_sources))
+        yield f"data: {json.dumps({'sources': _cited_sources(final_answer)}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
