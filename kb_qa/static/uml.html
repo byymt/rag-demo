@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>kb_qa 系统 UML 图（软件工程与 UML 大作业）</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Microsoft YaHei", sans-serif; background: #f8f9fa; padding: 40px 20px; }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 22px; color: #1a1a1a; margin-bottom: 8px; }
+  .meta { font-size: 14px; color: #666; margin-bottom: 30px; }
+  .section { background: #fff; border-radius: 12px; padding: 24px; margin-bottom: 24px;
+             box-shadow: 0 2px 12px rgba(0,0,0,.06); }
+  .section h2 { font-size: 16px; color: #2c3e50; margin-bottom: 16px; padding-bottom: 10px;
+                border-bottom: 2px solid #eaf0ff; }
+  .desc { font-size: 13px; color: #555; margin-bottom: 16px; line-height: 1.6; }
+  .mermaid { background: #fafbfc; padding: 16px; border-radius: 8px; border: 1px solid #eee; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎓 kb_qa 知识库问答系统 UML 设计</h1>
+  <p class="meta">软件工程与 UML 大作业 | 福州大学至诚学院 软件工程 2024 级 | 叶鸣涛 212406448</p>
+
+  <!-- ============ 类图 ============ -->
+  <div class="section">
+    <h2>1. 系统类图（Class Diagram）</h2>
+    <p class="desc">核心模块/类及其依赖关系。FastAPI 路由层 → 业务层（Agent/Kb/Auth）→ 数据层（MySQL/Chroma），分层解耦。</p>
+    <div class="mermaid">
+classDiagram
+    class User {
+      +str username
+      +str password_hash
+      +datetime created_at
+    }
+    class Document {
+      +int id
+      +str filename
+      +str uploader
+      +int chunks
+      +list~str~ chroma_ids
+      +str file_hash
+    }
+    class QaHistory {
+      +int id
+      +str session_id
+      +str question
+      +str answer
+      +list~str~ source_doc
+      +datetime created_at
+    }
+
+    class FastAPI_Router {
+      +POST /register()
+      +POST /login()
+      +POST /logout()
+      +POST /chat()
+      +POST /chat/stream()
+      +POST /kb/upload()
+      +GET /kb/docs()
+      +PUT /kb/docs/{id}()
+      +DELETE /kb/docs/{id}()
+      +GET /kb/stats()
+    }
+
+    class Auth {
+      +register(username, pwd) ok,msg
+      +login(username, pwd) ok,token
+      +logout(token)
+      +current_user(token) str
+    }
+
+    class Agent {
+      +chat(question, session_id) str
+      +chat_stream(question, session_id) iter
+      - _build_graph() StateGraph
+    }
+
+    class Kb {
+      +add_file_to_kb(path) list~id~
+      +delete_by_ids(ids)
+      +hybrid_search(query) list~chunk~
+      +last_sources list
+      - _rewrite_query(query) str
+      - _vector_search(query) list
+      - _get_bm25() bm25
+    }
+
+    class MySQL_DB {
+      +create_user()
+      +add_document()
+      +update_document_name()
+      +delete_document()
+      +add_qa_record()
+      +doc_question_stats()
+    }
+
+    class Chroma_VectorStore {
+      +add_documents()
+      +delete()
+      +similarity_search_with_score()
+    }
+
+    FastAPI_Router --> Auth : 鉴权
+    FastAPI_Router --> Agent : 问答
+    FastAPI_Router --> Kb : 检索/上传
+    FastAPI_Router --> MySQL_DB : 业务数据
+
+    Agent --> Kb : 调 search_knowledge 工具
+    Agent ..> Chroma_VectorStore : 通过 Kb 间接使用
+
+    Kb --> Chroma_VectorStore : 向量检索/切片存储
+    Kb --> MySQL_DB : 文档元数据/去重
+
+    MySQL_DB --> User : 操作
+    MySQL_DB --> Document : 操作
+    MySQL_DB --> QaHistory : 操作
+
+    Document --o QaHistory : source_doc 引用
+    User --o Document : uploader 上传
+    User --o QaHistory : session_id 关联
+    </div>
+  </div>
+
+  <!-- ============ 时序图1：上传文档 ============ -->
+  <div class="section">
+    <h2>2. 时序图：上传文档入库（Sequence Diagram）</h2>
+    <p class="desc">完整的"前端上传→后端处理→数据库变化"链路，满足验收标准1的增/改/删全链路验证点。</p>
+    <div class="mermaid">
+sequenceDiagram
+    participant U as 用户(浏览器)
+    participant F as docs.html 前端
+    participant R as FastAPI 路由
+    participant A as Auth 鉴权
+    participant K as Kb 知识库
+    participant C as Chroma 向量库
+    participant M as MySQL 业务库
+    participant FS as 文件系统
+
+    U->>F: 选择文件 → 点"上传入库"
+    F->>R: POST /kb/upload (带 X-Token + 文件)
+    R->>A: require_user(token)
+    A-->>R: username 合法
+    R->>R: 检查扩展名白名单
+    R->>R: 文件名消毒(防路径穿越)
+    R->>FS: save_as 消毒后文件名
+    R->>K: add_file_to_kb(file_path)
+    K->>K: load_pptx/Docx/Txt → Document 对象列表
+    K->>K: RecursiveCharacterTextSplitter(500/50) 切片
+    K->>C: vectorstore.add_documents(chunks)
+    C-->>K: 返回 chroma_ids 列表
+    K-->>R: 返回切片列表 ids
+    R->>M: add_document(filename, uploader, chunks, chroma_ids, file_hash)
+    M-->>R: 返回自增 doc_id
+    R-->>F: 200 { filename, chunks, doc_id }
+    F->>F: 渲染成功提示
+    F->>F: 自动刷新文档列表 + 看板
+    Note over F: (每5秒 setInterval 自动拉 /kb/docs)<br>实现多端互动：其他用户不用刷新也能看到新文档
+    </div>
+  </div>
+
+  <!-- ============ 时序图2：提问检索 ============ -->
+  <div class="section">
+    <h2>3. 时序图：提问检索+多轮对话（Sequence Diagram）</h2>
+    <p class="desc">Agent ReAct 循环核心——LLM 自主决定查不查资料、查几次；检索层的改写→双路→门控三步防幻觉。</p>
+    <div class="mermaid">
+sequenceDiagram
+    participant U as 用户(浏览器)
+    participant F as chat.html 前端
+    participant R as FastAPI /chat
+    participant A as LangGraph Agent
+    participant T as search_knowledge 工具
+    participant K as Kb 混合检索
+    participant C as Chroma 向量
+    participant B as BM25 索引
+    participant M as MySQL qa_history
+
+    U->>F: 输入问题 "什么是类图？"
+    F->>R: POST /chat { question, session_id }
+    R->>R: check_rate_limit(30次/分钟)
+    R->>A: agent.chat(question, session_id)
+    A->>A: 多轮改写(有历史则改独立问句)
+    loop ReAct 循环 (最多5轮)
+      A->>A: agent_node LLM 输出
+      alt LLM 输出 "行动: search_knowledge"
+        A->>T: 调用搜索工具
+        T->>K: hybrid_search(query)
+        K->>K: _rewrite_query "类图的定义和作用"
+        K->>C: similarity_search_with_score (cosine, K=10)
+        C-->>K: 向量 Top10 + 相似度分
+        K->>B: BM25 jieba 分词索引
+        B-->>K: BM25 Top10 + 匹配分
+        K->>K: 放行门控: vec≥0.40 OR BM25≥0.9?
+        alt 放行
+          K->>K: RRF 融合 → Top3 切片
+        else 拒答
+          K->>K: 返回 [] (空触发降级)
+        end
+        K-->>T: 命中片段列表 + last_sources
+        T-->>A: 工具观察(写回 scratchpad)
+      else LLM 输出 "最终答案"
+        A->>A: save_node 追加 chat_history
+      end
+    end
+    A-->>R: 最终答案 (引用标 [1][2] 角标)
+    R->>M: add_qa_record(question, answer, source_doc)
+    R->>R: _cited_sources(答案含角标?)
+    R-->>F: { answer, sources }
+    F->>F: 渲染答案气泡 + 引用来源区块
+    Note over F: (看板每10秒自动拉 /kb/stats)<br>其他用户能看到"类图.pptx"被问次数+1
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
