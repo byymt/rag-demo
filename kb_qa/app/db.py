@@ -326,13 +326,24 @@ def doc_question_stats():
 
 
 def _parse_sources(raw):
-    """把 qa_history.source_doc 的 JSON 文本解析成列表；空/坏数据返回空列表。"""
+    """把 qa_history.source_doc 的 JSON 文本解析成文件名列表；空/坏数据返回空列表。
+    兼容旧格式：早期版本存的是 [{"name":..,"page":..}] dict 列表，
+    统一抽出 name，保证返回的永远是字符串列表（互动看板按文件名分组）。"""
     if not raw:
         return []
     try:
-        return json.loads(raw)
+        data = json.loads(raw)
     except ValueError:
         return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for item in data:
+        if isinstance(item, str):
+            out.append(item)
+        elif isinstance(item, dict) and item.get("name"):
+            out.append(item["name"])
+    return out
 
 
 def get_recent_activities(limit=10):

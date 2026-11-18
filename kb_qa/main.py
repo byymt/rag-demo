@@ -204,10 +204,6 @@ def upload_api(request: Request, file: UploadFile = File(...)) -> dict:
     """登录后才能调：收文件 → 存到 uploads/ → 切片入库 → 记 MySQL → 返回切片数。"""
     username = require_user(request)  # 未登录会在这里被拦下（401）
 
-    # 0. 文件大小限制（content-length 是客户端声明的，先挡一道）
-    if file.content_length is not None and file.content_length > MAX_UPLOAD_SIZE:
-        raise HTTPException(status_code=413, detail=f"文件过大，最大 {MAX_UPLOAD_SIZE // 1024 // 1024}MB")
-
     # 1. 先检查扩展名，不对直接拒绝（400 = 客户端参数错误）
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in ALLOWED_EXTS:
@@ -224,6 +220,12 @@ def upload_api(request: Request, file: UploadFile = File(...)) -> dict:
     save_path = os.path.join(UPLOADS_DIR, safe_name)
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
+
+    # 0. 文件大小限制：落地后查实际大小（UploadFile.content_length 在部分
+    #    FastAPI/starlette 版本里已移除，改用磁盘真实大小最可靠）
+    if os.path.getsize(save_path) > MAX_UPLOAD_SIZE:
+        os.remove(save_path)
+        raise HTTPException(status_code=413, detail=f"文件过大，最大 {MAX_UPLOAD_SIZE // 1024 // 1024}MB")
 
     # 2b. 优化5：按文件内容哈希去重——同一个文件传两遍会产生双倍切片、检索结果重复
     with open(save_path, "rb") as f:
