@@ -102,6 +102,7 @@ function chk(r) {
   if (r.status === 401) {
     localStorage.removeItem("kb_token");
     localStorage.removeItem("kb_user");
+    localStorage.removeItem("kb_admin");
     location.href = "index.html";
   }
   return r;
@@ -228,7 +229,11 @@ async function loadStats() {
 }
 
 function logout() {
+  // 清干净全部登录标志——尤其 kb_admin，否则管理员退出后标志残留，
+  // 浏览器里下一个普通账号也会显示"管理端"入口
   localStorage.removeItem("kb_token");
+  localStorage.removeItem("kb_user");
+  localStorage.removeItem("kb_admin");
   location.href = "index.html";
 }
 

@@ -107,6 +107,8 @@ async function send() {
 
   if (r.status === 401) {
     localStorage.removeItem("kb_token");
+    localStorage.removeItem("kb_user");
+    localStorage.removeItem("kb_admin");
     location.href = "index.html";
     return;
   }
@@ -192,6 +194,8 @@ async function pollActivity() {
   });
   if (r.status === 401) {
     localStorage.removeItem("kb_token");
+    localStorage.removeItem("kb_user");
+    localStorage.removeItem("kb_admin");
     location.href = "index.html";
     return;
   }

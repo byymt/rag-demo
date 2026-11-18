@@ -85,8 +85,12 @@ const esc = (s) => String(s).replace(/[&<>"']/g,
 const headers = () => ({ "X-Token": localStorage.getItem("kb_token") });
 
 function chk(r) {
-  if (r.status === 401) {
+  // 401=未登录；403=登录了但不是管理员（比如手动改 localStorage 伪造标志）
+  // ——两种情况都清干净全部标志再踢回登录页，双保险（后端 require_admin 本来就会拦）
+  if (r.status === 401 || r.status === 403) {
     localStorage.removeItem("kb_token");
+    localStorage.removeItem("kb_user");
+    localStorage.removeItem("kb_admin");
     location.href = "index.html";
   }
   return r;
