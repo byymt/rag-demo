@@ -96,6 +96,12 @@ async function send() {
     body: JSON.stringify({ question: q, session_id: sessionId }),
   });
 
+  if (r.status === 401) {
+    localStorage.removeItem("kb_token");
+    location.href = "index.html";
+    return;
+  }
+
   if (!r.ok || !r.body) {
     // 流式失败 → 退回普通接口
     const data = await (r.json ? r.json() : {});

@@ -1,9 +1,11 @@
-"""业务数据库模块：MySQL 连接、建表、documents / qa_history 的增删查。
+"""业务数据库模块：MySQL 连接池、建表、documents / qa_history 的增删查。
 
 分工：MySQL 存"业务数据"（谁传了什么文档、谁问了什么问题），
 Chroma 向量库存"文档切片"（负责语义检索）——两个库各管一摊。
 """
 import json
+from collections import defaultdict
+from queue import Queue, Empty
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -12,9 +14,14 @@ from app.config import (
     MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB,
 )
 
+# ===== 连接池：避免每次请求新建连接的开销 =====
+# 课程项目并发不高，池大小设 5 够用；连接取走后用完归还，断连自动重建。
+_POOL_SIZE = 5
+_pool: Queue = Queue(maxsize=_POOL_SIZE)
 
-def get_conn():
-    """拿一条新连接。autocommit=True：每条 SQL 立即生效，不用手动 commit。"""
+
+def _new_conn():
+    """新建一条连接。autocommit=True：每条 SQL 立即生效，不用手动 commit。"""
     return pymysql.connect(
         host=MYSQL_HOST,
         port=MYSQL_PORT,
@@ -25,6 +32,34 @@ def get_conn():
         autocommit=True,
         cursorclass=DictCursor,
     )
+
+
+def get_conn():
+    """从池里拿一条连接；池空就新建。拿到后先 ping 一下，断连就重建。"""
+    try:
+        conn = _pool.get_nowait()
+        conn.ping(reconnect=True)
+        return conn
+    except Empty:
+        return _new_conn()
+    except Exception:
+        # 池里的连接坏了，丢弃再新建
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return _new_conn()
+
+
+def release_conn(conn):
+    """用完归还连接池；池满就直接关闭。"""
+    try:
+        _pool.put_nowait(conn)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def init_db():
@@ -66,24 +101,23 @@ def init_db():
     with conn.cursor() as cur:
         for sql in sqls:
             cur.execute(sql)
-    conn.close()
+    release_conn(conn)
 
-    # 旧表补列（列已存在会报 1060，忽略）
-    try:
-        conn = get_conn()
-        with conn.cursor() as cur:
-            cur.execute("ALTER TABLE qa_history ADD COLUMN source_doc TEXT")
-        conn.close()
-    except pymysql.err.OperationalError:
-        pass
-    # 文件哈希列：重复上传检测用（优化5）
-    try:
-        conn = get_conn()
-        with conn.cursor() as cur:
-            cur.execute("ALTER TABLE documents ADD COLUMN file_hash VARCHAR(64)")
-        conn.close()
-    except pymysql.err.OperationalError:
-        pass
+    # 旧表补列（列已存在报 1060，只忽略这个错误；其他错误照常抛出）
+    for col_sql in [
+        "ALTER TABLE qa_history ADD COLUMN source_doc TEXT",
+        "ALTER TABLE documents ADD COLUMN file_hash VARCHAR(64)",
+    ]:
+        try:
+            conn = get_conn()
+            with conn.cursor() as cur:
+                cur.execute(col_sql)
+            release_conn(conn)
+        except pymysql.err.OperationalError as e:
+            if e.args[0] != 1060:  # 1060 = Duplicate column name
+                release_conn(conn)
+                raise
+            release_conn(conn)
 
 
 # ===== users 表操作 =====
@@ -100,7 +134,7 @@ def create_user(username, password_hash):
             uid = cur.lastrowid
         except pymysql.err.IntegrityError:
             uid = None
-    conn.close()
+    release_conn(conn)
     return uid
 
 
@@ -110,7 +144,7 @@ def get_user_by_username(username):
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM users WHERE username = %s", (username,))
         row = cur.fetchone()
-    conn.close()
+    release_conn(conn)
     return row
 
 
@@ -125,7 +159,7 @@ def add_document(filename, uploader, chunks, chroma_ids, file_hash=""):
             (filename, uploader, chunks, json.dumps(list(chroma_ids)), file_hash),
         )
         doc_id = cur.lastrowid
-    conn.close()
+    release_conn(conn)
     return doc_id
 
 
@@ -135,7 +169,7 @@ def get_document_by_hash(file_hash):
     with conn.cursor() as cur:
         cur.execute("SELECT id, filename FROM documents WHERE file_hash = %s", (file_hash,))
         row = cur.fetchone()
-    conn.close()
+    release_conn(conn)
     return row
 
 
@@ -147,7 +181,7 @@ def list_documents():
             "SELECT id, filename, uploader, chunks, created_at FROM documents ORDER BY id DESC"
         )
         rows = cur.fetchall()
-    conn.close()
+    release_conn(conn)
     return rows
 
 
@@ -157,7 +191,7 @@ def get_document(doc_id):
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM documents WHERE id = %s", (doc_id,))
         row = cur.fetchone()
-    conn.close()
+    release_conn(conn)
     return row
 
 
@@ -166,7 +200,7 @@ def delete_document(doc_id):
     conn = get_conn()
     with conn.cursor() as cur:
         n = cur.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
-    conn.close()
+    release_conn(conn)
     return n > 0
 
 
@@ -180,23 +214,30 @@ def add_qa_record(session_id, question, answer, source_doc="[]"):
             "INSERT INTO qa_history (session_id, question, answer, source_doc) VALUES (%s, %s, %s, %s)",
             (session_id, question, answer, source_doc),
         )
-    conn.close()
+    release_conn(conn)
 
 
 def doc_question_stats():
-    """互动看板数据：每个文档被提问几次 + 最近一次问题。"""
+    """互动看板数据：每个文档被提问几次 + 最近一次问题。
+    优化：先一次性把 qa_history 按来源文件名建索引（O(qas)），
+    再遍历 documents 查表（O(docs)），整体 O(n) 而非原来的 O(docs*qas)。"""
     conn = get_conn()
     with conn.cursor() as cur:
         cur.execute("SELECT id, filename, uploader FROM documents ORDER BY id")
         docs = cur.fetchall()
         cur.execute("SELECT question, source_doc, created_at FROM qa_history ORDER BY id DESC")
         qas = cur.fetchall()
-    conn.close()
+    release_conn(conn)
+
+    # 来源文件名 -> 命中的 qa 列表（qa_history 已按 id 倒序，所以列表也是时间倒序）
+    file_hits = defaultdict(list)
+    for q in qas:
+        for fname in _parse_sources(q["source_doc"]):
+            file_hits[fname].append(q)
 
     stats = []
     for d in docs:
-        # source_doc 里存的是来源文件名 JSON，和 documents.filename 匹配
-        hits = [q for q in qas if d["filename"] in _parse_sources(q["source_doc"])]
+        hits = file_hits.get(d["filename"], [])
         stats.append({
             "filename": d["filename"],
             "uploader": d["uploader"],

@@ -12,7 +12,9 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
+from collections import defaultdict, deque
 
 import gradio as gr
 import uvicorn
@@ -43,6 +45,33 @@ def require_user(request: Request) -> str:
     return username
 
 
+# ===== 简易限流：防止 /chat 被刷爆 API 配额（课程项目用内存滑窗，生产换 Redis）=====
+RATE_LIMIT_PER_MIN = 30  # 每个 IP 每分钟最多 30 次问答请求
+_rate_window: dict = defaultdict(deque)  # ip -> 时间戳队列
+
+
+def check_rate_limit(request: Request) -> None:
+    """按客户端 IP 限流，超限抛 429。"""
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    dq = _rate_window[ip]
+    while dq and now - dq[0] > 60:
+        dq.popleft()
+    if len(dq) >= RATE_LIMIT_PER_MIN:
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
+    dq.append(now)
+
+
+def resolve_session(request: Request, session_id: str) -> str:
+    """把 session_id 和登录用户/客户端 IP 绑定，防止 A 冒充 B 的会话读到别人对话。
+    已登录：u:{用户名}:{session_id}；未登录：ip:{客户端IP}:{session_id}。"""
+    user = auth.current_user(request.headers.get("X-Token", ""))
+    if user:
+        return f"u:{user}:{session_id}"
+    ip = request.client.host if request.client else "anon"
+    return f"ip:{ip}:{session_id}"
+
+
 # ---- 接口0：注册 / 登录 ----
 
 class AuthRequest(BaseModel):
@@ -68,6 +97,13 @@ def login_api(req: AuthRequest) -> dict:
     return {"token": result, "username": req.username}
 
 
+@api.post("/logout")
+def logout_api(request: Request) -> dict:
+    """登出：让后端的 token 立即失效（前端只需清 localStorage）。"""
+    auth.logout(request.headers.get("X-Token", ""))
+    return {"message": "已退出登录"}
+
+
 # ---- 接口1：POST /chat 问答 ----
 
 class ChatRequest(BaseModel):
@@ -90,32 +126,38 @@ def _cited_sources(answer: str) -> list:
 
 
 @api.post("/chat", response_model=ChatResponse)
-def chat_api(req: ChatRequest) -> ChatResponse:
+def chat_api(request: Request, req: ChatRequest) -> ChatResponse:
     """收问题 → 调 Agent → 回答案。session_id 区分不同用户的会话。"""
-    kb.last_sources = []  # 清空上一问的来源，防止把旧命中记到这一问头上
-    answer = agent.chat(req.question, req.session_id)
+    check_rate_limit(request)
+    kb._clear_sources()  # 清空当前线程的上一问来源，防止串到这一问
+    session_id = resolve_session(request, req.session_id)
+    answer = agent.chat(req.question, session_id)
     # 写入 MySQL：问题、答案、命中了哪些文档（互动看板靠它统计）
-    db.add_qa_record(req.session_id, req.question, answer, json.dumps(kb.last_sources))
+    db.add_qa_record(session_id, req.question, answer, json.dumps(kb.last_sources))
     return ChatResponse(answer=answer, sources=_cited_sources(answer))
 
 
 # ---- 接口1b：POST /chat/stream 流式问答（SSE，前端打字机效果） ----
 
 @api.post("/chat/stream")
-def chat_stream_api(req: ChatRequest) -> StreamingResponse:
+def chat_stream_api(request: Request, req: ChatRequest) -> StreamingResponse:
     """逐段推送 Agent 的原始 ReAct 输出（思考/行动/最终答案）。
     前端按"最终答案:"切分：之前的是思考过程，之后的进答案气泡。"""
-    kb.last_sources = []
+    check_rate_limit(request)
+    session_id = resolve_session(request, req.session_id)
 
     def gen():
+        # 注意：生成器跑在事件循环线程里，所以清空来源要放在这里（和 search 同线程），
+        # 不能放在外面——外面是线程池线程，线程本地存储互不相通。
+        kb._clear_sources()
         raw = ""
-        for chunk in agent.chat_stream(req.question, req.session_id):
+        for chunk in agent.chat_stream(req.question, session_id):
             raw += chunk
             yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
         # 流结束：把干净答案 + 命中来源写进 MySQL（互动看板用）；
         # 来源列表单独推一个事件给前端渲染"引用来源"区块（仅当答案真有角标）
         final_answer = agent.extract_final(raw)
-        db.add_qa_record(req.session_id, req.question, final_answer, json.dumps(kb.last_sources))
+        db.add_qa_record(session_id, req.question, final_answer, json.dumps(kb.last_sources))
         yield f"data: {json.dumps({'sources': _cited_sources(final_answer)}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -125,20 +167,26 @@ def chat_stream_api(req: ChatRequest) -> StreamingResponse:
 # ---- 接口5：GET /kb/stats 互动看板 ----
 
 @api.get("/kb/stats")
-def stats_api() -> dict:
-    """每个文档被提问几次 + 最近一次问题——多端互动的数据源。"""
+def stats_api(request: Request) -> dict:
+    """每个文档被提问几次 + 最近一次问题——多端互动的数据源。需登录。"""
+    require_user(request)
     return {"stats": db.doc_question_stats()}
 
 
 # ---- 接口2：POST /kb/upload 上传入库 ----
 
 ALLOWED_EXTS = (".pdf", ".txt", ".md", ".docx", ".pptx")
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 单文件最大 50MB，防止磁盘被打满
 
 
 @api.post("/kb/upload")
 def upload_api(request: Request, file: UploadFile = File(...)) -> dict:
     """登录后才能调：收文件 → 存到 uploads/ → 切片入库 → 记 MySQL → 返回切片数。"""
     username = require_user(request)  # 未登录会在这里被拦下（401）
+
+    # 0. 文件大小限制（content-length 是客户端声明的，先挡一道）
+    if file.content_length is not None and file.content_length > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail=f"文件过大，最大 {MAX_UPLOAD_SIZE // 1024 // 1024}MB")
 
     # 1. 先检查扩展名，不对直接拒绝（400 = 客户端参数错误）
     ext = os.path.splitext(file.filename)[1].lower()
@@ -149,6 +197,7 @@ def upload_api(request: Request, file: UploadFile = File(...)) -> dict:
     safe_name = file.filename.replace("\\", "/").split("/")[-1].strip()
     if not safe_name:
         raise HTTPException(status_code=400, detail="文件名不合法")
+    safe_name = safe_name[:200]  # 文件名最多 200 字符
 
     # 2. 把上传的文件保存到 uploads/ 目录（uploads 目录不存在就创建）
     os.makedirs(UPLOADS_DIR, exist_ok=True)
@@ -170,9 +219,13 @@ def upload_api(request: Request, file: UploadFile = File(...)) -> dict:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"入库失败: {e}")
 
-    # 4. 记入 MySQL（谁传的、切了几片、Chroma 切片 id 是什么、内容哈希）——
-    #    存消毒后的文件名，页面渲染和磁盘文件保持一致
-    doc_id = db.add_document(safe_name, username, len(ids), ids, file_hash)
+    # 4. 记入 MySQL——若失败，回滚已写入 Chroma 的切片，避免产生孤儿切片
+    try:
+        doc_id = db.add_document(safe_name, username, len(ids), ids, file_hash)
+    except Exception as e:
+        kb.delete_by_ids(ids)  # 回滚：删掉刚入库的向量切片
+        os.remove(save_path)   # 同时删掉落地文件
+        raise HTTPException(status_code=500, detail=f"登记失败已回滚: {e}")
 
     return {"filename": safe_name, "chunks": len(ids), "doc_id": doc_id}
 
@@ -180,8 +233,9 @@ def upload_api(request: Request, file: UploadFile = File(...)) -> dict:
 # ---- 接口3：GET /kb/docs 文档列表 ----
 
 @api.get("/kb/docs")
-def list_docs_api() -> dict:
-    """查 MySQL documents 表，返回所有已入库文档。"""
+def list_docs_api(request: Request) -> dict:
+    """查 MySQL documents 表，返回所有已入库文档。需登录。"""
+    require_user(request)
     return {"documents": db.list_documents()}
 
 
@@ -189,7 +243,8 @@ def list_docs_api() -> dict:
 
 @api.delete("/kb/docs/{doc_id}")
 def delete_doc_api(doc_id: int, request: Request) -> dict:
-    """删文档 = Chroma 删切片 + 删物理文件 + MySQL 删记录，三处一起删。只能删自己上传的。"""
+    """删文档 = Chroma 删切片 + 删物理文件 + MySQL 删记录，三处一起删。只能删自己上传的。
+    每步用 try-except 包住，某步失败不影响其他步，尽量保证一致性。"""
     username = require_user(request)
 
     row = db.get_document(doc_id)
@@ -199,12 +254,18 @@ def delete_doc_api(doc_id: int, request: Request) -> dict:
         raise HTTPException(status_code=403, detail="只能删除自己上传的文档")
 
     # 1. 删 Chroma 向量切片（靠上传时存下的 chroma_ids）
-    kb.delete_by_ids(json.loads(row["chroma_ids"] or "[]"))
+    try:
+        kb.delete_by_ids(json.loads(row["chroma_ids"] or "[]"))
+    except Exception as e:
+        print(f"[删除] Chroma 切片删除失败 doc_id={doc_id}: {e}")
 
     # 2. 删上传的物理文件
     file_path = os.path.join(UPLOADS_DIR, row["filename"])
-    if os.path.exists(file_path):
-        os.remove(file_path)
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception as e:
+        print(f"[删除] 物理文件删除失败 {file_path}: {e}")
 
     # 3. 删 MySQL 记录
     db.delete_document(doc_id)

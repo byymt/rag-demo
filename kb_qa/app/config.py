@@ -30,7 +30,7 @@ CHUNK_OVERLAP = 50
 #    BM25_STRONG_SCORE: BM25 强关键词信号线。用途：向量路全军覆没时，只有 BM25 达线才放行。
 #                       试点实测（软件工程课件，900+切片）："什么是X"类短问法得分普遍 1.0~1.5，
 #                       1.5 会误杀真问题 → 降到 0.9；误放行的兜底由提示词"通用知识标注"接住
-SIM_THRESHOLD = 0.40
+SIM_THRESHOLD = 0.400
 VECTOR_K = 10
 RRF_K = 60
 BM25_STRONG_SCORE = 0.9

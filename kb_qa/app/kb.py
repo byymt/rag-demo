@@ -1,6 +1,7 @@
 """知识库模块：读文件、切片、入库、检索——知识库的一切操作都从这里走。"""
 import os
 import re
+import threading
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain_core.documents import Document
@@ -60,6 +61,7 @@ def load_any_file(path):
 # ===== 函数2：入库（上传接口调用）=====
 def add_file_to_kb(path):
     """读文件 → 切片 → 入库 → 返回 Chroma 切片 id 列表（删除文档时要用）。"""
+    global _bm25
     docs = load_any_file(path)
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
@@ -67,34 +69,58 @@ def add_file_to_kb(path):
     )
     chunks = splitter.split_documents(docs)
     ids = vectorstore.add_documents(chunks)
+    _bm25 = None  # 新切片入库，强制下次重建 BM25 索引
     return ids
 
 
 # ===== 函数2b：按 id 删切片（删除文档接口调用）=====
 def delete_by_ids(ids):
     """按 Chroma id 删除切片；空列表直接跳过。"""
+    global _bm25
     if ids:
         vectorstore.delete(ids=ids)
+        _bm25 = None  # 切片变了，强制下次重建 BM25 索引
 
 
 # ===== 函数3：检索（Agent 的工具以后调它）=====
-# 最近一次检索命中的来源文件名列表（chat 接口记录"问答命中哪个文档"用）
-last_sources = []
+# 最近一次检索命中的来源文件名列表（chat 接口记录"问答命中哪个文档"用）。
+# 用 threading.local 而非全局变量：FastAPI 的 def 接口跑在线程池里，
+# 多个请求并发时全局变量会被互相覆盖（A 的回答挂 B 的来源）。
+# 线程本地存储保证每个请求线程各有一份，互不干扰。
+_thread_local = threading.local()
+
+
+def _get_sources():
+    if not hasattr(_thread_local, "last_sources"):
+        _thread_local.last_sources = []
+    return _thread_local.last_sources
+
+
+def _clear_sources():
+    _thread_local.last_sources = []
+
+
+def __getattr__(name):
+    """模块级属性钩子：kb.last_sources 返回当前线程的来源列表（真实 list，可直接 json 序列化）。
+    这样 main.py 不用改读取逻辑，且每个线程拿到的都是自己那份。"""
+    if name == "last_sources":
+        return _get_sources()
+    raise AttributeError(f"module 'app.kb' has no attribute {name!r}")
 
 
 def search(query):
     """混合检索 + 阈值过滤，返回带来源的拼接文本；检索不到返回提示语。"""
-    global last_sources
-    last_sources = []
+    _clear_sources()
     docs = hybrid_search(query, k=RETRIEVER_K)
     if not docs:
         return "没有检索到相关资料"
     parts = []
+    sources = _get_sources()
     for i, doc in enumerate(docs, 1):
         name = os.path.basename(doc.metadata.get("source", "未知来源"))
         page = doc.metadata.get("page")  # pptx/pdf 切片带页码，md/txt 没有
         loc = f"{name}(第{page}页)" if page else name
-        last_sources.append({"name": name, "page": page})
+        sources.append({"name": name, "page": page})
         parts.append(f"[{i}] 来源:{loc}\n{doc.page_content}")
     return "\n\n".join(parts)
 
@@ -118,7 +144,7 @@ def _get_bm25():
     ids = data["ids"]
     if not ids:
         return None, [], []
-    if _bm25 is not None and len(_bm25_ids) == len(ids):
+    if _bm25 is not None and set(_bm25_ids) == set(ids):
         return _bm25, _bm25_ids, _bm25_docs
     docs = [
         SimpleNamespace(page_content=text, metadata=meta or {})

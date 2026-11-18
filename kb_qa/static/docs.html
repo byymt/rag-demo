@@ -69,12 +69,22 @@ document.getElementById("who").textContent = "当前用户：" + me;
 
 function headers() { return { "X-Token": localStorage.getItem("kb_token") }; }
 
+// 统一拦截 401：token 失效（如后端重启）时自动跳回登录页
+function chk(r) {
+  if (r.status === 401) {
+    localStorage.removeItem("kb_token");
+    localStorage.removeItem("kb_user");
+    location.href = "index.html";
+  }
+  return r;
+}
+
 // HTML 转义：文件名/用户名/问题都来自用户输入，直接拼 innerHTML 会被注入脚本（XSS）
 const esc = (s) => String(s).replace(/[&<>"']/g,
   (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 
 async function load() {
-  const r = await fetch("/kb/docs");
+  const r = chk(await fetch("/kb/docs", { headers: headers() }));
   const data = await r.json();
   const tbody = document.getElementById("rows");
   tbody.innerHTML = "";
@@ -97,7 +107,7 @@ async function doUpload() {
   if (!f) { showMsg("up-msg", "请先选择文件", false); return; }
   const fd = new FormData();
   fd.append("file", f);
-  const r = await fetch("/kb/upload", { method: "POST", headers: headers(), body: fd });
+  const r = chk(await fetch("/kb/upload", { method: "POST", headers: headers(), body: fd }));
   const data = await r.json();
   if (r.status === 200) {
     showMsg("up-msg", `《${data.filename}》入库成功，切了 ${data.chunks} 片`, true);
@@ -109,7 +119,7 @@ async function doUpload() {
 
 async function doDelete(id) {
   if (!confirm(`确定删除文档 ${id} 吗？`)) return;
-  const r = await fetch(`/kb/docs/${id}`, { method: "DELETE", headers: headers() });
+  const r = chk(await fetch(`/kb/docs/${id}`, { method: "DELETE", headers: headers() }));
   const data = await r.json();
   if (r.status !== 200) { alert(data.detail || "删除失败"); return; }
   load();
@@ -123,7 +133,7 @@ function showMsg(id, text, ok) {
 
 // 互动看板：读 /kb/stats，展示每个文档被问次数和最近问题
 async function loadStats() {
-  const r = await fetch("/kb/stats");
+  const r = chk(await fetch("/kb/stats", { headers: headers() }));
   const data = await r.json();
   const tbody = document.getElementById("stat-rows");
   tbody.innerHTML = "";

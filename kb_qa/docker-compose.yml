@@ -24,8 +24,8 @@ services:
       - .env               # MYSQL_ROOT_PASSWORD / MYSQL_USER / MYSQL_PASSWORD 从这里来
     environment:
       MYSQL_DATABASE: kb_qa   # 容器首次启动自动建库 kb_qa，并自动创建 .env 里指定的用户
-    ports:
-      - "3306:3306"
+    # 不映射 3306 到宿主机：MySQL 只在 compose 内网供应用容器访问，
+    # 暴露到公网会被爆破。需要本地连数据库时用 docker exec 进容器。
     volumes:
       - mysql_data:/var/lib/mysql  # 数据库文件挂宿主机，容器重建数据不丢
     healthcheck:

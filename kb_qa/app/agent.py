@@ -1,6 +1,8 @@
 """Agent 模块：LangGraph 图 + 工具表，对外只暴露 chat()。"""
-from typing import TypedDict
+import ast
+import operator
 import re
+from typing import TypedDict
 
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END, START
@@ -23,9 +25,32 @@ def search_knowledge(query: str) -> str:
     return kb_search(query)
 
 def calculator(expression: str) -> str:
-    """计算数学表达式的结果，输入是算式，例如 2*(3+4)/7。"""
+    """计算数学表达式的结果，输入是算式，例如 2*(3+4)/7。
+    用 ast 解析只允许数字和 +-*/%** 运算，绝不调用 eval——
+    eval 会执行任意代码，若课件藏 prompt injection 诱导调用恶意表达式就完了。"""
+    _allowed_ops = {
+        ast.Add: operator.add, ast.Sub: operator.sub,
+        ast.Mult: operator.mul, ast.Div: operator.truediv,
+        ast.Mod: operator.mod, ast.Pow: operator.pow,
+        ast.USub: operator.neg, ast.UAdd: operator.pos,
+    }
+
+    def _eval(node):
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return node.value
+        if isinstance(node, ast.BinOp) and type(node.op) in _allowed_ops:
+            return _allowed_ops[type(node.op)](_eval(node.left), _eval(node.right))
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _allowed_ops:
+            return _allowed_ops[type(node.op)](_eval(node.operand))
+        raise ValueError("只支持数字和 +-*/%** 运算")
+
     try:
-        return str(eval(expression))
+        tree = ast.parse(expression, mode="eval")
+        return str(_eval(tree))
+    except ZeroDivisionError:
+        return "计算失败: 除数不能为 0"
     except Exception as e:
         return f"计算失败: {e}"
 
@@ -143,8 +168,13 @@ def tool_node(state:AgentState):
     return {"scratchpad":state["scratchpad"]+f"观察:{observation}\n"}
 
 def save_node(state:AgentState):
-    """档案员：把本轮问答写进 chat_history，实现跨轮记忆。"""
-    return {"chat_history":state.get("chat_history","")+f"用户:{state['question']}\n助手:{state['answer']}\n"}
+    """档案员：把本轮问答写进 chat_history，实现跨轮记忆。
+    只保留最近 10 轮（20 行），防止多轮对话把 prompt 撑爆 token 上限。"""
+    history = state.get("chat_history","") + f"用户:{state['question']}\n助手:{state['answer']}\n"
+    lines = [l for l in history.split("\n") if l]
+    if len(lines) > 20:
+        history = "\n".join(lines[-20:]) + "\n"
+    return {"chat_history": history}
 
 def route(state:AgentState):
     """交通指挥：有答案去 save，没答案去 tool。"""
