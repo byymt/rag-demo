@@ -31,9 +31,23 @@
   .empty { color: #999; text-align: center; padding: 16px; }
   .sync-tag { font-size: 12px; color: #2eaa5e; background: #e6f7ec; padding: 2px 8px; border-radius: 10px; margin-left: 8px; }
   .row-edit input { width: 180px; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
+  /* 活动流 */
+  .act-item { display: flex; gap: 8px; padding: 8px 0; border-bottom: 1px solid #f2f2f2; font-size: 13px; }
+  .act-item:last-child { border-bottom: none; }
+  .act-icon { flex-shrink: 0; }
+  .act-time { color: #999; font-size: 12px; margin-left: auto; flex-shrink: 0; }
+  /* 右上角弹窗通知（多端互动"收到消息"的感知） */
+  #toast-box { position: fixed; top: 16px; right: 16px; z-index: 999; display: flex;
+               flex-direction: column; gap: 8px; max-width: 320px; }
+  .toast { background: #32363f; color: #fff; padding: 10px 14px; border-radius: 8px;
+           font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.25);
+           animation: slidein .3s ease; line-height: 1.5; }
+  .toast b { color: #7fb2ff; }
+  @keyframes slidein { from { transform: translateX(120%); opacity: 0; } to { transform: none; opacity: 1; } }
 </style>
 </head>
 <body>
+<div id="toast-box"></div>
   <div class="wrap">
     <div class="nav">
       <h1>📁 文档管理 <span class="sync-tag" id="sync-tag">🔄 实时同步中</span></h1>
@@ -64,6 +78,11 @@
         <thead><tr><th>文档</th><th>上传者</th><th>被问次数</th><th>最近一次问题</th></tr></thead>
         <tbody id="stat-rows"></tbody>
       </table>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-bottom:10px;font-size:15px">📡 实时动态（别人的上传/提问 3 秒内出现在这里并弹窗提醒）</h3>
+      <div id="act-rows"><p class="empty">加载中...</p></div>
     </div>
   </div>
 
@@ -201,13 +220,60 @@ function logout() {
   location.href = "index.html";
 }
 
-// ============ 多端互动核心：自动轮询 ============
-// 验收标准要求"多端系统的互动"——A 上传新文档 / 提问，B 不用手动刷新就能看到
-// 用 5 秒轮询文档列表、10 秒轮询看板数据，课程项目足够轻量
+// ============ 多端互动核心：实时活动流 + 弹窗通知 ============
+// 验收标准要求"多端系统的互动"（如买家下单→卖家收到消息）。
+// 实现：每 3 秒轮询 /kb/activity，发现比上次新的活动就：
+//   1) 更新页面底部"实时动态"列表
+//   2) 右上角弹窗通知（别人做的事，我这边立刻感知到）
+let lastActTime = null;   // 上次看到的最新活动时间，用于判断"新事件"
+
+function toast(html) {
+  const box = document.getElementById("toast-box");
+  const t = document.createElement("div");
+  t.className = "toast";
+  t.innerHTML = html;   // 内容已在本函数内做 esc() 转义，安全
+  box.appendChild(t);
+  setTimeout(() => t.remove(), 5000);
+}
+
+async function pollActivity() {
+  const r = chk(await fetch("/kb/activity", { headers: headers() }));
+  const data = await r.json();
+  const acts = data.activities || [];
+  const box = document.getElementById("act-rows");
+  box.innerHTML = "";
+  if (!acts.length) {
+    box.innerHTML = '<p class="empty">还没有动态</p>';
+    return;
+  }
+  for (const a of acts) {
+    const div = document.createElement("div");
+    div.className = "act-item";
+    const icon = a.type === "upload" ? "📤" : "❓";
+    const verb = a.type === "upload" ? "上传了文档" : "提问";
+    div.innerHTML = `<span class="act-icon">${icon}</span>
+      <span><b>${esc(a.actor)}</b> ${verb}《${esc(a.detail)}》</span>
+      <span class="act-time">${esc(a.time.slice(11, 19))}</span>`;
+    box.appendChild(div);
+  }
+  // 弹窗：只给"别人的新事件"弹（首次加载不弹，自己操作不弹）
+  if (lastActTime !== null && acts.length) {
+    for (const a of acts) {
+      if (a.time > lastActTime && a.actor !== me) {
+        const verb = a.type === "upload" ? "上传了新文档" : "刚问了问题";
+        toast(`📡 <b>${esc(a.actor)}</b> ${verb}<br>${esc(a.detail)}`);
+      }
+    }
+  }
+  if (acts.length) lastActTime = acts[0].time;
+}
+
 load();
 loadStats();
+pollActivity();
 setInterval(() => { if (currentEditingId === null) load(); }, 5000);   // 文档列表 5 秒刷新
 setInterval(loadStats, 10000);                                         // 看板 10 秒刷新
+setInterval(pollActivity, 3000);                                       // 活动流 3 秒刷新（互动感知）
 </script>
 </body>
 </html>

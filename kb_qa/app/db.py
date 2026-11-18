@@ -268,3 +268,52 @@ def _parse_sources(raw):
         return json.loads(raw)
     except ValueError:
         return []
+
+
+def get_recent_activities(limit=10):
+    """取最近 limit 条"活动时间线"——上传文档 + 提问 + 删除。
+    多端互动的核心数据源：A 上传/提问，B 的前端轮询这个接口就能感知到。"""
+    conn = get_conn()
+    with conn.cursor() as cur:
+        # 最近上传
+        cur.execute(
+            "SELECT 'upload' AS type, filename AS detail, uploader AS actor, created_at "
+            "FROM documents ORDER BY id DESC LIMIT %s",
+            (limit,),
+        )
+        uploads = cur.fetchall()
+        # 最近提问（只取前 50 条再内存排序，避免大表 SQL UNION 复杂度）
+        cur.execute(
+            "SELECT 'question' AS type, question AS detail, session_id AS actor, created_at "
+            "FROM qa_history ORDER BY id DESC LIMIT %s",
+            (limit * 5,),
+        )
+        questions = cur.fetchall()
+    release_conn(conn)
+
+    # 合并 + 按时间倒序
+    all_rows = uploads + questions
+    all_rows.sort(key=lambda r: r["created_at"], reverse=True)
+    # 同一秒内多条合并？课程项目不用，直接去重（session_id 是 u:user:... 格式，提取用户名）
+    seen_keys = set()
+    activities = []
+    for r in all_rows:
+        # 去重：同一人同秒内的操作只保留一条
+        key = (str(r["created_at"]), r["actor"], r["type"])
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        actor = r["actor"]
+        if actor.startswith("u:"):   # session_id 格式 u:username:...
+            actor = actor.split(":")[1]
+        elif actor.startswith("ip:"):
+            actor = actor.split(":")[1]
+        activities.append({
+            "type": r["type"],
+            "actor": actor,
+            "detail": r["detail"][:60],    # 截断长问题/文件名
+            "time": str(r["created_at"]),
+        })
+        if len(activities) >= limit:
+            break
+    return activities

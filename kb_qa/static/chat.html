@@ -23,9 +23,18 @@
   button { padding: 10px 20px; border: none; border-radius: 6px;
            background: #4a7cff; color: #fff; font-size: 14px; cursor: pointer; }
   .tip { color: #999; font-size: 12px; text-align: center; margin-top: 8px; }
+  /* 右上角弹窗通知：多端互动——别人的上传/提问实时提醒我 */
+  #toast-box { position: fixed; top: 16px; right: 16px; z-index: 999; display: flex;
+               flex-direction: column; gap: 8px; max-width: 320px; }
+  .toast { background: #32363f; color: #fff; padding: 10px 14px; border-radius: 8px;
+           font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.25);
+           animation: slidein .3s ease; line-height: 1.5; }
+  .toast b { color: #7fb2ff; }
+  @keyframes slidein { from { transform: translateX(120%); opacity: 0; } to { transform: none; opacity: 1; } }
 </style>
 </head>
 <body>
+<div id="toast-box"></div>
   <div class="wrap">
     <div class="nav">
       <h1>💬 知识库提问</h1>
@@ -159,6 +168,47 @@ async function send() {
   }
   chatEl.scrollTop = chatEl.scrollHeight;
 }
+
+// ============ 多端互动：弹窗通知 ============
+// 每 3 秒拉一次 /kb/activity，别人的上传/提问在右上角弹窗提醒
+// （和 docs.html 同一套机制：A 操作 → B 立刻收到"消息"）
+const esc = (s) => String(s).replace(/[&<>"']/g,
+  (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const me = localStorage.getItem("kb_user");
+let lastActTime = null;
+
+function toast(html) {
+  const box = document.getElementById("toast-box");
+  const t = document.createElement("div");
+  t.className = "toast";
+  t.innerHTML = html;   // 内容已做 esc() 转义，安全
+  box.appendChild(t);
+  setTimeout(() => t.remove(), 5000);
+}
+
+async function pollActivity() {
+  const r = await fetch("/kb/activity", {
+    headers: { "X-Token": localStorage.getItem("kb_token") },
+  });
+  if (r.status === 401) {
+    localStorage.removeItem("kb_token");
+    location.href = "index.html";
+    return;
+  }
+  const acts = (await r.json()).activities || [];
+  if (lastActTime !== null) {
+    for (const a of acts) {
+      if (a.time > lastActTime && a.actor !== me) {
+        const verb = a.type === "upload" ? "上传了新文档" : "刚问了问题";
+        toast(`📡 <b>${esc(a.actor)}</b> ${verb}<br>${esc(a.detail)}`);
+      }
+    }
+  }
+  if (acts.length) lastActTime = acts[0].time;
+}
+
+pollActivity();
+setInterval(pollActivity, 3000);
 </script>
 </body>
 </html>

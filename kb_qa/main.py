@@ -173,6 +173,17 @@ def stats_api(request: Request) -> dict:
     return {"stats": db.doc_question_stats()}
 
 
+# ---- 接口6：GET /kb/activity 实时活动流（多端互动的"消息"数据源） ----
+
+@api.get("/kb/activity")
+def activity_api(request: Request) -> dict:
+    """最近 10 条活动：谁上传了什么文档、谁问了什么问题。
+    前端每 3 秒轮询一次，发现比上次更新的事件就弹通知——
+    这就是验收标准说的"A 下单 B 收到消息"式多端互动。需登录。"""
+    require_user(request)
+    return {"activities": db.get_recent_activities(10)}
+
+
 # ---- 接口2：POST /kb/upload 上传入库 ----
 
 ALLOWED_EXTS = (".pdf", ".txt", ".md", ".docx", ".pptx")
