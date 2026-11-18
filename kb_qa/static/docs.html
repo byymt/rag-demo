@@ -20,18 +20,23 @@
   button:hover { background: #3565e0; }
   button.del { background: #e04848; padding: 4px 10px; }
   button.del:hover { background: #c23a3a; }
+  button.rename { background: #ff9a3c; padding: 4px 10px; margin-right: 6px; }
+  button.rename:hover { background: #e08a30; }
+  button.small { padding: 3px 8px; font-size: 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { padding: 8px; border-bottom: 1px solid #eee; text-align: left; }
   th { color: #666; }
   .msg { font-size: 13px; margin-top: 10px; }
   .ok { color: #2eaa5e; } .err { color: #e04848; }
   .empty { color: #999; text-align: center; padding: 16px; }
+  .sync-tag { font-size: 12px; color: #2eaa5e; background: #e6f7ec; padding: 2px 8px; border-radius: 10px; margin-left: 8px; }
+  .row-edit input { width: 180px; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; }
 </style>
 </head>
 <body>
   <div class="wrap">
     <div class="nav">
-      <h1>📁 文档管理</h1>
+      <h1>📁 文档管理 <span class="sync-tag" id="sync-tag">🔄 实时同步中</span></h1>
       <span id="who" style="font-size:14px;color:#555"></span>
       <a href="chat.html">去提问 →</a>
       <a href="#" onclick="logout()">退出</a>
@@ -47,14 +52,14 @@
 
     <div class="card">
       <table>
-        <thead><tr><th>ID</th><th>文件名</th><th>上传者</th><th>切片</th><th>时间</th><th></th></tr></thead>
+        <thead><tr><th>ID</th><th>文件名</th><th>上传者</th><th>切片</th><th>时间</th><th>操作</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
       <p class="empty" id="empty" hidden>还没有文档，先上传一个</p>
     </div>
 
     <div class="card">
-      <h3 style="margin-bottom:10px;font-size:15px">🔥 互动看板（别人提问会实时反映到这里）</h3>
+      <h3 style="margin-bottom:10px;font-size:15px">🔥 互动看板（别人提问会实时反映到这里，自动刷新）</h3>
       <table>
         <thead><tr><th>文档</th><th>上传者</th><th>被问次数</th><th>最近一次问题</th></tr></thead>
         <tbody id="stat-rows"></tbody>
@@ -83,6 +88,8 @@ function chk(r) {
 const esc = (s) => String(s).replace(/[&<>"']/g,
   (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 
+let currentEditingId = null;  // 当前正在重命名的文档 ID，防止多行同时编辑
+
 async function load() {
   const r = chk(await fetch("/kb/docs", { headers: headers() }));
   const data = await r.json();
@@ -92,14 +99,51 @@ async function load() {
   document.getElementById("empty").hidden = docs.length > 0;
   for (const d of docs) {
     const tr = document.createElement("tr");
-    // 只有自己传的文档才显示删除按钮（后端也会再拦一次）
-    const delBtn = d.uploader === me
-      ? `<button class="del" onclick="doDelete(${d.id})">删除</button>` : "";
+    const isOwner = d.uploader === me;
+    let actions = "";
+    if (isOwner) {
+      // 只有自己传的文档才显示修改/删除按钮（后端也会再拦一次）
+      if (currentEditingId === d.id) {
+        // 正在编辑：显示输入框 + 确认/取消按钮
+        actions = `<span class="row-edit"><input id="rename-input-${d.id}" value="${esc(d.filename)}"></span>
+          <button class="small" style="background:#2eaa5e" onclick="confirmRename(${d.id})">确认</button>
+          <button class="small" style="background:#888" onclick="cancelRename()">取消</button>`;
+      } else {
+        actions = `<button class="rename" onclick="startRename(${d.id})">重命名</button>
+          <button class="del" onclick="doDelete(${d.id})">删除</button>`;
+      }
+    }
     tr.innerHTML = `<td>${d.id}</td><td>${esc(d.filename)}</td><td>${esc(d.uploader)}</td>
                     <td>${d.chunks}</td><td>${d.created_at.slice(0, 19).replace("T", " ")}</td>
-                    <td>${delBtn}</td>`;
+                    <td>${actions}</td>`;
     tbody.appendChild(tr);
   }
+}
+
+function startRename(id) {
+  currentEditingId = id;
+  load();
+}
+
+function cancelRename() {
+  currentEditingId = null;
+  load();
+}
+
+async function confirmRename(id) {
+  const input = document.getElementById(`rename-input-${id}`);
+  const newName = input.value.trim();
+  if (!newName) { alert("文件名不能为空"); return; }
+  const r = chk(await fetch(`/kb/docs/${id}`, {
+    method: "PUT",
+    headers: { ...headers(), "Content-Type": "application/json" },
+    body: JSON.stringify({ filename: newName })
+  }));
+  const data = await r.json();
+  if (r.status !== 200) { alert(data.detail || "修改失败"); return; }
+  currentEditingId = null;
+  load();
+  showMsg("up-msg", `已重命名：《${data.old_name}》→ 《${data.new_name}》`, true);
 }
 
 async function doUpload() {
@@ -112,6 +156,7 @@ async function doUpload() {
   if (r.status === 200) {
     showMsg("up-msg", `《${data.filename}》入库成功，切了 ${data.chunks} 片`, true);
     load();
+    loadStats();
   } else {
     showMsg("up-msg", data.detail || "上传失败", false);
   }
@@ -123,6 +168,7 @@ async function doDelete(id) {
   const data = await r.json();
   if (r.status !== 200) { alert(data.detail || "删除失败"); return; }
   load();
+  loadStats();
 }
 
 function showMsg(id, text, ok) {
@@ -139,7 +185,7 @@ async function loadStats() {
   tbody.innerHTML = "";
   const stats = data.stats || [];
   if (!stats.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">还没有数据</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">还没有数据，去聊天页提问试试</td></tr>';
     return;
   }
   for (const s of stats) {
@@ -155,8 +201,13 @@ function logout() {
   location.href = "index.html";
 }
 
+// ============ 多端互动核心：自动轮询 ============
+// 验收标准要求"多端系统的互动"——A 上传新文档 / 提问，B 不用手动刷新就能看到
+// 用 5 秒轮询文档列表、10 秒轮询看板数据，课程项目足够轻量
 load();
 loadStats();
+setInterval(() => { if (currentEditingId === null) load(); }, 5000);   // 文档列表 5 秒刷新
+setInterval(loadStats, 10000);                                         // 看板 10 秒刷新
 </script>
 </body>
 </html>

@@ -204,6 +204,18 @@ def delete_document(doc_id):
     return n > 0
 
 
+def update_document_name(doc_id, new_filename):
+    """修改文档文件名（用户上传时可能手滑写错，允许改名）。返回是否真的改了。"""
+    conn = get_conn()
+    with conn.cursor() as cur:
+        n = cur.execute(
+            "UPDATE documents SET filename = %s WHERE id = %s",
+            (new_filename[:200], doc_id),
+        )
+    release_conn(conn)
+    return n > 0
+
+
 # ===== qa_history 表操作 =====
 
 def add_qa_record(session_id, question, answer, source_doc="[]"):

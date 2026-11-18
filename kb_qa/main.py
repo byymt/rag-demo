@@ -239,6 +239,26 @@ def list_docs_api(request: Request) -> dict:
     return {"documents": db.list_documents()}
 
 
+# ---- 接口3b：PUT /kb/docs/{doc_id} 修改文档名 ----
+
+@api.put("/kb/docs/{doc_id}")
+def update_doc_name_api(doc_id: int, req: dict, request: Request) -> dict:
+    """修改文档文件名。只能改自己上传的。"""
+    username = require_user(request)
+    new_name = req.get("filename", "").strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="新文件名不能为空")
+
+    row = db.get_document(doc_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"文档不存在: id={doc_id}")
+    if row["uploader"] != username:
+        raise HTTPException(status_code=403, detail="只能修改自己上传的文档")
+
+    ok = db.update_document_name(doc_id, new_name)
+    return {"updated": doc_id, "old_name": row["filename"], "new_name": new_name}
+
+
 # ---- 接口4：DELETE /kb/docs/{doc_id} 删除文档 ----
 
 @api.delete("/kb/docs/{doc_id}")
