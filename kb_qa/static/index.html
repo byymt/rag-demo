@@ -70,6 +70,7 @@ async function doLogin() {
   if (status === 200) {
     localStorage.setItem("kb_token", data.token);   // 之后每个请求都带它
     localStorage.setItem("kb_user", data.username);
+    localStorage.setItem("kb_admin", data.is_admin ? "1" : "0");  // 决定要不要显示管理端入口
     location.href = "docs.html";
   } else {
     show("login-msg", data.detail, false);

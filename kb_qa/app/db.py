@@ -107,6 +107,10 @@ def init_db():
     for col_sql in [
         "ALTER TABLE qa_history ADD COLUMN source_doc TEXT",
         "ALTER TABLE documents ADD COLUMN file_hash VARCHAR(64)",
+        "ALTER TABLE users ADD COLUMN is_admin TINYINT NOT NULL DEFAULT 0",
+        # 审核流：新上传默认 pending（待审核），审核通过才切片入库
+        # 默认 approved：已有的历史文档不用重新审核
+        "ALTER TABLE documents ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'approved'",
     ]:
         try:
             conn = get_conn()
@@ -119,17 +123,32 @@ def init_db():
                 raise
             release_conn(conn)
 
+    # 管理员初始化：库里还没有任何管理员时，把最早注册的用户提为管理员
+    # （老库升级后自动有一个管理员，不用手动改数据）
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM users WHERE is_admin = 1")
+        if cur.fetchone()["n"] == 0:
+            cur.execute("SELECT MIN(id) AS mid FROM users")
+            row = cur.fetchone()
+            if row["mid"] is not None:
+                cur.execute("UPDATE users SET is_admin = 1 WHERE id = %s", (row["mid"],))
+    release_conn(conn)
+
 
 # ===== users 表操作 =====
 
 def create_user(username, password_hash):
-    """插入一行用户，返回自增 id；用户名重复返回 None（UNIQUE 约束兜底）。"""
+    """插入一行用户，返回自增 id；用户名重复返回 None（UNIQUE 约束兜底）。
+    库里第一个用户自动成为管理员（否则新系统没人能审核）。"""
     conn = get_conn()
     with conn.cursor() as cur:
         try:
+            cur.execute("SELECT COUNT(*) AS n FROM users")
+            is_first = cur.fetchone()["n"] == 0
             cur.execute(
-                "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
-                (username, password_hash),
+                "INSERT INTO users (username, password_hash, is_admin) VALUES (%s, %s, %s)",
+                (username, password_hash, 1 if is_first else 0),
             )
             uid = cur.lastrowid
         except pymysql.err.IntegrityError:
@@ -150,13 +169,15 @@ def get_user_by_username(username):
 
 # ===== documents 表操作 =====
 
-def add_document(filename, uploader, chunks, chroma_ids, file_hash=""):
-    """插入一行文档记录，返回自增 id。chroma_ids 是列表，存成 JSON 字符串。"""
+def add_document(filename, uploader, chunks, chroma_ids, file_hash="", status="approved"):
+    """插入一行文档记录，返回自增 id。chroma_ids 是列表，存成 JSON 字符串。
+    status: pending=待审核（未入库）/ approved=已入库 / rejected=已驳回。"""
     conn = get_conn()
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO documents (filename, uploader, chunks, chroma_ids, file_hash) VALUES (%s, %s, %s, %s, %s)",
-            (filename, uploader, chunks, json.dumps(list(chroma_ids)), file_hash),
+            "INSERT INTO documents (filename, uploader, chunks, chroma_ids, file_hash, status) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (filename, uploader, chunks, json.dumps(list(chroma_ids)), file_hash, status),
         )
         doc_id = cur.lastrowid
     release_conn(conn)
@@ -164,10 +185,14 @@ def add_document(filename, uploader, chunks, chroma_ids, file_hash=""):
 
 
 def get_document_by_hash(file_hash):
-    """按文件哈希查文档，命中返回该行（重复上传检测用），没有返回 None。"""
+    """按文件哈希查文档，命中返回该行（重复上传检测用），没有返回 None。
+    已驳回的不算重复——被驳回的文件修正后可以重新提交。"""
     conn = get_conn()
     with conn.cursor() as cur:
-        cur.execute("SELECT id, filename FROM documents WHERE file_hash = %s", (file_hash,))
+        cur.execute(
+            "SELECT id, filename FROM documents WHERE file_hash = %s AND status != 'rejected'",
+            (file_hash,),
+        )
         row = cur.fetchone()
     release_conn(conn)
     return row
@@ -178,7 +203,8 @@ def list_documents():
     conn = get_conn()
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, filename, uploader, chunks, created_at FROM documents ORDER BY id DESC"
+            "SELECT id, filename, uploader, chunks, status, created_at "
+            "FROM documents ORDER BY id DESC"
         )
         rows = cur.fetchall()
     release_conn(conn)
@@ -211,6 +237,45 @@ def update_document_name(doc_id, new_filename):
         n = cur.execute(
             "UPDATE documents SET filename = %s WHERE id = %s",
             (new_filename[:200], doc_id),
+        )
+    release_conn(conn)
+    return n > 0
+
+
+# ===== 审核流操作 =====
+
+def get_pending_documents():
+    """待审核文档列表（管理端轮询用）。"""
+    conn = get_conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, filename, uploader, created_at FROM documents "
+            "WHERE status = 'pending' ORDER BY id"
+        )
+        rows = cur.fetchall()
+    release_conn(conn)
+    return rows
+
+
+def set_document_ingested(doc_id, chroma_ids, chunks):
+    """审核通过：切片已入 Chroma，更新 chroma_ids/切片数，状态改 approved。"""
+    conn = get_conn()
+    with conn.cursor() as cur:
+        n = cur.execute(
+            "UPDATE documents SET chroma_ids = %s, chunks = %s, status = 'approved' "
+            "WHERE id = %s AND status = 'pending'",
+            (json.dumps(list(chroma_ids)), chunks, doc_id),
+        )
+    release_conn(conn)
+    return n > 0
+
+
+def set_document_status(doc_id, status):
+    """只改状态（驳回用）。"""
+    conn = get_conn()
+    with conn.cursor() as cur:
+        n = cur.execute(
+            "UPDATE documents SET status = %s WHERE id = %s", (status, doc_id),
         )
     release_conn(conn)
     return n > 0

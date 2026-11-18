@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kb_qa 管理端 · 文档审核</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Microsoft YaHei", sans-serif; background: #f0f2f5; padding: 20px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  .nav { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .nav h1 { font-size: 18px; flex: 1; }
+  .nav a { color: #4a7cff; text-decoration: none; font-size: 14px; }
+  .card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 16px;
+          box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px; border-bottom: 1px solid #eee; text-align: left; }
+  th { color: #666; }
+  .empty { color: #999; text-align: center; padding: 24px; }
+  button { padding: 5px 14px; border: none; border-radius: 6px; font-size: 13px; cursor: pointer;
+           color: #fff; background: #4a7cff; }
+  button:hover { background: #3565e0; }
+  button.ok { background: #2eaa5e; }
+  button.ok:hover { background: #248f4e; }
+  button.no { background: #e04848; margin-left: 6px; }
+  button.no:hover { background: #c23a3a; }
+  .badge { display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 10px;
+           color: #b45309; background: #fef3c7; }
+  .hint { font-size: 12px; color: #888; margin-top: 10px; line-height: 1.7; }
+  /* 状态机示意：讲清楚审核流的生命周期（UML 状态图的网页版） */
+  .fsm { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #555;
+         background: #f8f9fb; border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; }
+  .fsm .s { padding: 3px 10px; border-radius: 12px; font-size: 12px; }
+  .fsm .p { background: #fef3c7; color: #b45309; }
+  .fsm .a { background: #e6f7ec; color: #2eaa5e; }
+  .fsm .r { background: #fde8e6; color: #d93025; }
+  /* 右上角弹窗：用户提交新文档时管理员"收到消息" */
+  #toast-box { position: fixed; top: 16px; right: 16px; z-index: 999; display: flex;
+               flex-direction: column; gap: 8px; max-width: 320px; }
+  .toast { background: #32363f; color: #fff; padding: 10px 14px; border-radius: 8px;
+           font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.25);
+           animation: slidein .3s ease; line-height: 1.5; }
+  .toast b { color: #7fb2ff; }
+  @keyframes slidein { from { transform: translateX(120%); opacity: 0; } to { transform: none; opacity: 1; } }
+</style>
+</head>
+<body>
+<div id="toast-box"></div>
+<div class="wrap">
+  <div class="nav">
+    <h1>🛡 管理端 · 文档审核</h1>
+    <span id="who" style="font-size:14px;color:#555"></span>
+    <a href="docs.html">← 返回文档管理</a>
+  </div>
+
+  <div class="card">
+    <div class="fsm">
+      文档状态机：
+      <span class="s p">⏳ 待审核</span> → 通过 → <span class="s a">✅ 已入库（可检索）</span>
+      <span style="margin:0 4px">/</span> 驳回 → <span class="s r">❌ 已驳回</span>
+    </div>
+    <h3 style="font-size:15px;margin-bottom:10px">📥 待审核列表（用户提交后 3 秒内出现在这里）</h3>
+    <table>
+      <thead><tr><th>编号</th><th>文件名</th><th>提交者</th><th>提交时间</th><th>操作</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="hint">
+      审核通过才会切片进向量库、被所有人检索到——这就是"共享知识库防污染"：
+      任何人都能提交资料，但只有管理员把关后的内容才影响全库答案。
+    </p>
+  </div>
+</div>
+
+<script>
+// 权限守卫：非管理员直接踢走（后端接口也有 require_admin，双保险）
+if (localStorage.getItem("kb_admin") !== "1") {
+  alert("需要管理员权限");
+  location.href = "docs.html";
+}
+const me = localStorage.getItem("kb_user");
+document.getElementById("who").textContent = "管理员：" + me;
+
+const esc = (s) => String(s).replace(/[&<>"']/g,
+  (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const headers = () => ({ "X-Token": localStorage.getItem("kb_token") });
+
+function chk(r) {
+  if (r.status === 401) {
+    localStorage.removeItem("kb_token");
+    location.href = "index.html";
+  }
+  return r;
+}
+
+function toast(html) {
+  const t = document.createElement("div");
+  t.className = "toast";
+  t.innerHTML = html;   // 内容已做 esc() 转义
+  document.getElementById("toast-box").appendChild(t);
+  setTimeout(() => t.remove(), 5000);
+}
+
+let knownIds = null;   // 上次看到的待审核 id 集合，null=首次加载（不弹通知）
+
+async function loadPending() {
+  const r = chk(await fetch("/kb/pending", { headers: headers() }));
+  const docs = (await r.json()).documents || [];
+  const tbody = document.getElementById("rows");
+  tbody.innerHTML = "";
+  if (!docs.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">没有待审核的文档 ✨</td></tr>';
+  }
+  for (const d of docs) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${d.id}</td><td>${esc(d.filename)}</td><td>${esc(d.uploader)}</td>
+      <td>${String(d.created_at).slice(0, 19).replace("T", " ")}</td>
+      <td><button class="ok" onclick="review(${d.id}, 'approve')">通过入库</button>
+          <button class="no" onclick="review(${d.id}, 'reject')">驳回</button></td>`;
+    tbody.appendChild(tr);
+  }
+  // 新出现的提交 → 弹窗提醒（"买家下单→卖家收消息"同款互动）
+  const ids = new Set(docs.map((d) => d.id));
+  if (knownIds !== null) {
+    for (const d of docs) {
+      if (!knownIds.has(d.id) && d.uploader !== me) {
+        toast(`🔔 <b>${esc(d.uploader)}</b> 提交了新文档<br>《${esc(d.filename)}》等待审核`);
+      }
+    }
+  }
+  knownIds = ids;
+}
+
+async function review(id, action) {
+  const label = action === "approve" ? "通过并入库" : "驳回";
+  if (!confirm(`确定${label}这份文档？`)) return;
+  const r = chk(await fetch(`/kb/docs/${id}/${action}`, { method: "POST", headers: headers() }));
+  const data = await r.json();
+  if (r.status !== 200) { alert(data.detail || "操作失败"); return; }
+  loadPending();
+}
+
+loadPending();
+setInterval(loadPending, 3000);   // 3 秒轮询待审核列表
+</script>
+</body>
+</html>

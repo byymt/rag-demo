@@ -45,6 +45,14 @@ def require_user(request: Request) -> str:
     return username
 
 
+def require_admin(request: Request) -> str:
+    """在 require_user 基础上再查管理员角色；普通用户调审核接口直接 403。"""
+    username = require_user(request)
+    if not auth.is_admin(username):
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return username
+
+
 # ===== 简易限流：防止 /chat 被刷爆 API 配额（课程项目用内存滑窗，生产换 Redis）=====
 RATE_LIMIT_PER_MIN = 30  # 每个 IP 每分钟最多 30 次问答请求
 _rate_window: dict = defaultdict(deque)  # ip -> 时间戳队列
@@ -94,7 +102,8 @@ def login_api(req: AuthRequest) -> dict:
     if not ok:
         raise HTTPException(status_code=401, detail=result)
     # token 交给前端保存，之后每个请求带上 X-Token 头
-    return {"token": result, "username": req.username}
+    # is_admin 决定前端要不要显示"管理端"入口（后端接口仍会独立校验权限）
+    return {"token": result, "username": req.username, "is_admin": auth.is_admin(req.username)}
 
 
 @api.post("/logout")
@@ -224,21 +233,65 @@ def upload_api(request: Request, file: UploadFile = File(...)) -> dict:
         os.remove(save_path)  # 拒收，刚才落地的临时文件也删掉
         raise HTTPException(status_code=400, detail=f"该文件已上传过（《{dup['filename']}》，编号 {dup['id']}），请勿重复上传")
 
-    # 3. 入向量库；失败返回 500（服务器内部错误）
+    # 3. 登记为"待审核"：审核通过前不切片入库——知识库是所有人共享的，
+    #    任何人都能传资料会污染全库检索结果，所以必须经过管理员审核（状态机：
+    #    pending → approved / rejected）
     try:
-        ids = kb.add_file_to_kb(save_path)
+        doc_id = db.add_document(safe_name, username, 0, [], file_hash, status="pending")
+    except Exception as e:
+        os.remove(save_path)
+        raise HTTPException(status_code=500, detail=f"登记失败: {e}")
+
+    return {"filename": safe_name, "doc_id": doc_id, "status": "pending",
+            "message": "已提交，等待管理员审核通过后入库"}
+
+
+# ---- 接口7~9：审核流（管理端专用） ----
+
+@api.get("/kb/pending")
+def pending_docs_api(request: Request) -> dict:
+    """待审核文档列表。管理端每 3 秒轮询这个接口——用户提交新文档立刻出现在这里。"""
+    require_admin(request)
+    return {"documents": db.get_pending_documents()}
+
+
+@api.post("/kb/docs/{doc_id}/approve")
+def approve_doc_api(doc_id: int, request: Request) -> dict:
+    """审核通过：这时才真正切片入 Chroma，全库可检索。"""
+    require_admin(request)
+    row = db.get_document(doc_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"文档不存在: id={doc_id}")
+    if row["status"] != "pending":
+        raise HTTPException(status_code=400, detail=f"文档状态是 {row['status']}，无法审核")
+    path = os.path.join(UPLOADS_DIR, row["filename"])
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="原始文件已丢失，无法入库")
+    try:
+        ids = kb.add_file_to_kb(path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"入库失败: {e}")
+    db.set_document_ingested(doc_id, ids, len(ids))
+    return {"approved": doc_id, "filename": row["filename"], "chunks": len(ids)}
 
-    # 4. 记入 MySQL——若失败，回滚已写入 Chroma 的切片，避免产生孤儿切片
+
+@api.post("/kb/docs/{doc_id}/reject")
+def reject_doc_api(doc_id: int, request: Request) -> dict:
+    """驳回：不入库、删掉落地文件，记录保留（用户在文档列表能看到"已驳回"，修正后可重新提交）。"""
+    require_admin(request)
+    row = db.get_document(doc_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"文档不存在: id={doc_id}")
+    if row["status"] != "pending":
+        raise HTTPException(status_code=400, detail=f"文档状态是 {row['status']}，无法审核")
+    file_path = os.path.join(UPLOADS_DIR, row["filename"])
     try:
-        doc_id = db.add_document(safe_name, username, len(ids), ids, file_hash)
+        if os.path.exists(file_path):
+            os.remove(file_path)
     except Exception as e:
-        kb.delete_by_ids(ids)  # 回滚：删掉刚入库的向量切片
-        os.remove(save_path)   # 同时删掉落地文件
-        raise HTTPException(status_code=500, detail=f"登记失败已回滚: {e}")
-
-    return {"filename": safe_name, "chunks": len(ids), "doc_id": doc_id}
+        print(f"[驳回] 文件删除失败 {file_path}: {e}")
+    db.set_document_status(doc_id, "rejected")
+    return {"rejected": doc_id, "filename": row["filename"]}
 
 
 # ---- 接口3：GET /kb/docs 文档列表 ----
@@ -281,7 +334,8 @@ def delete_doc_api(doc_id: int, request: Request) -> dict:
     row = db.get_document(doc_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"文档不存在: id={doc_id}")
-    if row["uploader"] != username:
+    # 普通用户只能删自己的；管理员可以删任何人的（治理污染文档的权限）
+    if row["uploader"] != username and not auth.is_admin(username):
         raise HTTPException(status_code=403, detail="只能删除自己上传的文档")
 
     # 1. 删 Chroma 向量切片（靠上传时存下的 chroma_ids）

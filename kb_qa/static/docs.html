@@ -52,6 +52,7 @@
     <div class="nav">
       <h1>📁 文档管理 <span class="sync-tag" id="sync-tag">🔄 实时同步中</span></h1>
       <span id="who" style="font-size:14px;color:#555"></span>
+      <a href="admin.html" id="admin-link" hidden>🛡 管理端 →</a>
       <a href="chat.html">去提问 →</a>
       <a href="#" onclick="logout()">退出</a>
     </div>
@@ -66,7 +67,7 @@
 
     <div class="card">
       <table>
-        <thead><tr><th>ID</th><th>文件名</th><th>上传者</th><th>切片</th><th>时间</th><th>操作</th></tr></thead>
+        <thead><tr><th>ID</th><th>文件名</th><th>上传者</th><th>状态</th><th>切片</th><th>时间</th><th>操作</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
       <p class="empty" id="empty" hidden>还没有文档，先上传一个</p>
@@ -90,6 +91,9 @@
 const me = localStorage.getItem("kb_user");
 if (!localStorage.getItem("kb_token")) location.href = "index.html";  // 没登录踢回登录页
 document.getElementById("who").textContent = "当前用户：" + me;
+if (localStorage.getItem("kb_admin") === "1") {
+  document.getElementById("admin-link").hidden = false;  // 管理员才显示管理端入口
+}
 
 function headers() { return { "X-Token": localStorage.getItem("kb_token") }; }
 
@@ -118,10 +122,10 @@ async function load() {
   document.getElementById("empty").hidden = docs.length > 0;
   for (const d of docs) {
     const tr = document.createElement("tr");
-    const isOwner = d.uploader === me;
+    // 上传者本人或管理员都可以操作（后端会再独立校验一次权限）
+    const canManage = d.uploader === me || localStorage.getItem("kb_admin") === "1";
     let actions = "";
-    if (isOwner) {
-      // 只有自己传的文档才显示修改/删除按钮（后端也会再拦一次）
+    if (canManage) {
       if (currentEditingId === d.id) {
         // 正在编辑：显示输入框 + 确认/取消按钮
         actions = `<span class="row-edit"><input id="rename-input-${d.id}" value="${esc(d.filename)}"></span>
@@ -132,7 +136,15 @@ async function load() {
           <button class="del" onclick="doDelete(${d.id})">删除</button>`;
       }
     }
+    // 审核流状态徽章：pending→approved/rejected 三态一目了然
+    const stMap = {
+      pending:  ["⏳ 待审核", "#b45309", "#fef3c7"],
+      approved: ["✅ 已入库", "#2eaa5e", "#e6f7ec"],
+      rejected: ["❌ 已驳回", "#d93025", "#fde8e6"],
+    };
+    const st = stMap[d.status] || stMap.approved;
     tr.innerHTML = `<td>${d.id}</td><td>${esc(d.filename)}</td><td>${esc(d.uploader)}</td>
+                    <td><span style="font-size:12px;padding:2px 8px;border-radius:10px;color:${st[1]};background:${st[2]}">${st[0]}</span></td>
                     <td>${d.chunks}</td><td>${d.created_at.slice(0, 19).replace("T", " ")}</td>
                     <td>${actions}</td>`;
     tbody.appendChild(tr);
@@ -173,7 +185,7 @@ async function doUpload() {
   const r = chk(await fetch("/kb/upload", { method: "POST", headers: headers(), body: fd }));
   const data = await r.json();
   if (r.status === 200) {
-    showMsg("up-msg", `《${data.filename}》入库成功，切了 ${data.chunks} 片`, true);
+    showMsg("up-msg", `《${data.filename}》已提交，等待管理员审核通过后入库`, true);
     load();
     loadStats();
   } else {
@@ -250,7 +262,7 @@ async function pollActivity() {
     const div = document.createElement("div");
     div.className = "act-item";
     const icon = a.type === "upload" ? "📤" : "❓";
-    const verb = a.type === "upload" ? "上传了文档" : "提问";
+    const verb = a.type === "upload" ? "提交了文档（待审核）" : "提问";
     div.innerHTML = `<span class="act-icon">${icon}</span>
       <span><b>${esc(a.actor)}</b> ${verb}《${esc(a.detail)}》</span>
       <span class="act-time">${esc(a.time.slice(11, 19))}</span>`;
@@ -260,7 +272,7 @@ async function pollActivity() {
   if (lastActTime !== null && acts.length) {
     for (const a of acts) {
       if (a.time > lastActTime && a.actor !== me) {
-        const verb = a.type === "upload" ? "上传了新文档" : "刚问了问题";
+        const verb = a.type === "upload" ? "提交了文档待审核" : "刚问了问题";
         toast(`📡 <b>${esc(a.actor)}</b> ${verb}<br>${esc(a.detail)}`);
       }
     }

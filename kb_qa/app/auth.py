@@ -75,3 +75,9 @@ def current_user(token: str):
 def logout(token: str):
     """登出：从内存里删掉 token，使其立即失效。"""
     _tokens.pop(token or "", None)
+
+
+def is_admin(username: str) -> bool:
+    """查库判断是否管理员（审核接口用）。"""
+    row = db.get_user_by_username(username)
+    return bool(row and row.get("is_admin"))
