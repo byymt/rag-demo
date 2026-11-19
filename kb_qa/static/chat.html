@@ -113,7 +113,10 @@ async function send() {
 
   const r = await fetch("/chat/stream", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Token": localStorage.getItem("kb_token"),  // 鉴权头：漏了会被后端 401 踢回登录页
+    },
     body: JSON.stringify({ question: q, session_id: sessionId }),
   });
 
