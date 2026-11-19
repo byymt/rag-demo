@@ -1,7 +1,17 @@
-"""Agent 模块：LangGraph 图 + 工具表，对外只暴露 chat()。"""
-import ast
-import operator
+"""Agent 模块：LangGraph 图 + 工具表，对外只暴露 chat()。
+
+大作业结构对照：
+- 工具函数在 app/tools.py（名称/用途/参数说明见 TOOL_SPECS）
+- 系统提示词在项目根 system_prompt.md（职责、工具规则、输出要求）
+- 本模块负责：模型调用、ReAct 双层循环编排、日志埋点
+
+双层循环：
+- 外层 = Web 服务连续对话（main.py 的 /chat 接口，thread_id 区分会话）
+- 内层 = LangGraph 的 agent→tool→agent… 迭代，直到给出最终答案或到达最大轮数
+"""
+import os
 import re
+import time
 from typing import TypedDict
 
 from langchain_openai import ChatOpenAI
@@ -9,10 +19,11 @@ from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
 
 from app.config import (
-    CHAT_MODEL, TEMPERATURE,
+    BASE_DIR, CHAT_MODEL, TEMPERATURE,
     DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL,
 )
-from app.kb import search as kb_search
+from app.logger import log_model_call, log_tool_call, log_task, log_error
+from app.tools import TOOLS, TOOL_SPECS, current_user
 
 llm = ChatOpenAI(
     base_url=DASHSCOPE_BASE_URL,
@@ -20,80 +31,26 @@ llm = ChatOpenAI(
     model=CHAT_MODEL,
     temperature=TEMPERATURE,
 )
-def search_knowledge(query: str) -> str:
-    """在知识库中检索资料，返回带来源文件名的片段。"""
-    return kb_search(query)
 
-def calculator(expression: str) -> str:
-    """计算数学表达式的结果，输入是算式，例如 2*(3+4)/7。
-    用 ast 解析只允许数字和 +-*/%** 运算，绝不调用 eval——
-    eval 会执行任意代码，若课件藏 prompt injection 诱导调用恶意表达式就完了。"""
-    _allowed_ops = {
-        ast.Add: operator.add, ast.Sub: operator.sub,
-        ast.Mult: operator.mul, ast.Div: operator.truediv,
-        ast.Mod: operator.mod, ast.Pow: operator.pow,
-        ast.USub: operator.neg, ast.UAdd: operator.pos,
-    }
+# ===== 系统提示词外置（system_prompt.md）：职责/工具规则/输出要求都在里面 =====
+# .format() 填五个变量：memory（长期记忆）/ search_query（改写后问题）/ chat_history / question / scratchpad
+with open(os.path.join(BASE_DIR, "system_prompt.md"), encoding="utf-8") as _f:
+    REACT_PROMPT = _f.read()
 
-    def _eval(node):
-        if isinstance(node, ast.Expression):
-            return _eval(node.body)
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return node.value
-        if isinstance(node, ast.BinOp) and type(node.op) in _allowed_ops:
-            return _allowed_ops[type(node.op)](_eval(node.left), _eval(node.right))
-        if isinstance(node, ast.UnaryOp) and type(node.op) in _allowed_ops:
-            return _allowed_ops[type(node.op)](_eval(node.operand))
-        raise ValueError("只支持数字和 +-*/%** 运算")
+MAX_STEPS = 5  # 内层循环最大轮数：防模型陷入"检索→不满意→再检索"死循环
 
-    try:
-        tree = ast.parse(expression, mode="eval")
-        return str(_eval(tree))
-    except ZeroDivisionError:
-        return "计算失败: 除数不能为 0"
-    except Exception as e:
-        return f"计算失败: {e}"
-
-TOOLS = {"search_knowledge": search_knowledge, "calculator": calculator}
-
-REACT_PROMPT = """你是一个知识库问答助手，你有两个工具：
-
-工具1: search_knowledge
-作用: 在知识库中检索资料，参数是检索用的关键词或问句。
-
-工具2: calculator
-作用: 计算数学表达式，参数是一个算式，例如 2*(3+4)/7。
-
-请严格按格式输出，每轮只输出一种内容：
-
-思考: 你当前的推理（是否需要检索、检索什么）
-行动: search_knowledge
-行动输入: 检索的关键词或问句
-
-当你认为资料已足够回答问题时，停止检索并输出：
-思考: 我已经掌握足够的资料
-最终答案: 优先依据检索到的资料作答，并在引用资料的位置标注编号角标（如"……[1]"），编号与检索片段开头的 [1][2] 对应，让学生能查到出处。若资料未覆盖问题，先说明"知识库资料未覆盖该问题"，再基于通用知识给出参考回答（该部分不标角标），并在回答末尾标注"（注：以上补充内容来自模型通用知识，非知识库课件，请以教材为准）"。禁止把通用知识伪装成课件内容。
-
-重要: "观察"内容由系统填写，你不要自己编造"观察:"。
-
-检索参考（已结合上下文改写，行动输入应与其保持一致）: {search_query}
-
-历史对话:
-{chat_history}
-
-问题: {question}
-
-{scratchpad}"""
 
 class AgentState(TypedDict):
     question:str
     search_query:str
     chat_history:str
+    memory:str          # 长期记忆文本（重启后仍生效的那部分）
     scratchpad:str
     action:str
     action_input:str
     steps:int
     answer:str
+
 
 # ===== 优化1：查询改写 =====
 # 多轮对话的痛点："那要带什么材料"直接拿去检索效果差。
@@ -115,28 +72,44 @@ def rewrite_question(question, chat_history):
     try:
         out = llm.invoke(REWRITE_PROMPT.format(chat_history=chat_history, question=question))
         return out.content.strip() or question
-    except Exception:
+    except Exception as e:
+        log_error("查询改写", e)
         return question
+
 
 def extract(text,pattern):
     m = re.search(pattern,text)
     return m.group(1).strip() if m else ""
 
+
+def _token_usage(resp) -> dict:
+    """从 LangChain 的 AIMessage 里取 Token 用量（openai 兼容字段，取不到就空表）。"""
+    meta = getattr(resp, "response_metadata", None) or {}
+    return meta.get("token_usage") or {}
+
+
 def agent_node(state:AgentState):
     """大脑：组装提示词 → 调模型 → 解析输出 → 决定下一步。"""
-    Max_steps=5
-    if state["steps"] >= Max_steps:
+    if state["steps"] >= MAX_STEPS:
         return {"answer":"已到达最大轮数，仍无法给出答案。"}
 
     prompt = REACT_PROMPT.format(
         question=state["question"],
         search_query=state.get("search_query", "") or state["question"],
         chat_history = state.get("chat_history",""),
+        memory = state.get("memory","") or "（暂无）",
         scratchpad = state["scratchpad"]
     )
-    text = llm.invoke(prompt).content.strip()
-    text = re.split(r"观察[:：]",text)[0].strip()
+    t0 = time.time()
+    try:
+        resp = llm.invoke(prompt)
+        text = resp.content.strip()
+        log_model_call(state["steps"] + 1, CHAT_MODEL, time.time() - t0, _token_usage(resp))
+    except Exception as e:
+        log_error("模型调用", e)
+        return {"answer":"模型调用失败，请稍后重试。", "steps": state["steps"] + 1}
 
+    text = re.split(r"观察[:：]",text)[0].strip()
     print(f"-----第{state['steps']+1}轮------")
     print(text)
 
@@ -158,14 +131,22 @@ def agent_node(state:AgentState):
         "steps":state["steps"]+1
     }
 
+
 def tool_node(state:AgentState):
-    """手：查 TOOLS 表执行工具，把观察写回 scratchpad。"""
+    """手：查 TOOLS 表执行工具，把观察写回 scratchpad，并记录工具日志。"""
     tool = TOOLS.get(state["action"])
+    t0 = time.time()
     if tool is None:
         observation = f"没有名为{state['action']}的工具，可用工具:{list(TOOLS)}"
     else:
-        observation = tool(state["action_input"])
+        try:
+            observation = tool(state["action_input"])
+        except Exception as e:
+            log_error(f"工具{state['action']}执行", e)
+            observation = f"工具执行出错: {e}"
+    log_tool_call(state["action"], state["action_input"], observation, time.time() - t0)
     return {"scratchpad":state["scratchpad"]+f"观察:{observation}\n"}
+
 
 def save_node(state:AgentState):
     """档案员：把本轮问答写进 chat_history，实现跨轮记忆。
@@ -176,11 +157,13 @@ def save_node(state:AgentState):
         history = "\n".join(lines[-20:]) + "\n"
     return {"chat_history": history}
 
+
 def route(state:AgentState):
     """交通指挥：有答案去 save，没答案去 tool。"""
     if state["answer"]:
         return "save"
     return "tool"
+
 
 builder = StateGraph(AgentState)
 builder.add_node("agent",agent_node)
@@ -195,25 +178,42 @@ builder.add_edge("save",END)
 memory = MemorySaver()
 graph =builder.compile(checkpointer=memory)
 
-def chat(question,thread_id):
-    """每轮重置本轮字段，保留 chat_history，实现多轮记忆。追问先改写再入库检索。"""
+
+def _prepare(question, thread_id):
+    """chat / chat_stream 共用的前置：查历史、改写问题、设用户上下文。"""
     config = {"configurable":{"thread_id":thread_id}}
     prev = graph.get_state(config).values or {}
     history = prev.get("chat_history","") or ""
     rewritten = rewrite_question(question, history)
-    result = graph.invoke(
-        {
-            "answer":"",
-            "question":question,
-            "search_query":rewritten,
-            "scratchpad":"",
-            "action":"",
-            "action_input":"",
-            "steps":0
-        },
-        config = config
-    )
-    return result["answer"]
+    return config, history, rewritten
+
+
+def chat(question, thread_id, username="anonymous", memory_text=""):
+    """每轮重置本轮字段，保留 chat_history，实现多轮记忆。
+    追问先改写再入库检索；长期记忆注入提示词；工具经 current_user 知道给谁存。"""
+    token = current_user.set(username)
+    t0 = time.time()
+    try:
+        config, history, rewritten = _prepare(question, thread_id)
+        result = graph.invoke(
+            {
+                "answer":"",
+                "question":question,
+                "search_query":rewritten,
+                "memory":memory_text,
+                "scratchpad":"",
+                "action":"",
+                "action_input":"",
+                "steps":0
+            },
+            config = config
+        )
+        rounds = result["steps"]
+        note = f"memory={'有' if memory_text else '无'}"
+        log_task(question, time.time() - t0, rounds, note)
+        return result["answer"]
+    finally:
+        current_user.reset(token)
 
 
 def extract_final(raw):
@@ -223,37 +223,44 @@ def extract_final(raw):
     return raw.strip()
 
 
-def chat_stream(question, thread_id):
+def chat_stream(question, thread_id, username="anonymous", memory_text=""):
     """流式版 chat：逐段产出模型的原始 ReAct 输出，前端按"最终答案:"切分显示。
     思考/行动也实时流出——演示时能看到 Agent 的推理过程。"""
-    config = {"configurable":{"thread_id":thread_id}}
-    prev = graph.get_state(config).values or {}
-    history = prev.get("chat_history","") or ""
-    rewritten = rewrite_question(question, history)
-    for msg, _meta in graph.stream(
-        {
-            "answer":"",
-            "question":question,
-            "search_query":rewritten,
-            "scratchpad":"",
-            "action":"",
-            "action_input":"",
-            "steps":0
-        },
-        config = config,
-        stream_mode = "messages",
-    ):
-        # 只放行模型的文字 token（跳过工具消息和空块）
-        if type(msg).__name__ in ("AIMessageChunk", "AIMessage"):
-            content = msg.content
-            if isinstance(content, str) and content:
-                yield content
-            elif isinstance(content, list):
-                text = "".join(part.get("text","") for part in content if isinstance(part, dict))
-                if text:
-                    yield text
+    token = current_user.set(username)
+    t0 = time.time()
+    try:
+        config, history, rewritten = _prepare(question, thread_id)
+        for msg, _meta in graph.stream(
+            {
+                "answer":"",
+                "question":question,
+                "search_query":rewritten,
+                "memory":memory_text,
+                "scratchpad":"",
+                "action":"",
+                "action_input":"",
+                "steps":0
+            },
+            config = config,
+            stream_mode = "messages",
+        ):
+            # 只放行模型的文字 token（跳过工具消息和空块）
+            if type(msg).__name__ in ("AIMessageChunk", "AIMessage"):
+                content = msg.content
+                if isinstance(content, str) and content:
+                    yield content
+                elif isinstance(content, list):
+                    text = "".join(part.get("text","") for part in content if isinstance(part, dict))
+                    if text:
+                        yield text
+        log_task(question, time.time() - t0, -1, "流式")
+    finally:
+        current_user.reset(token)
+
 
 if __name__ == "__main__":
     print(chat("校园卡丢了怎么补办？", "t1"))
     print(chat("那要带什么材料？", "t1"))          # 多轮记忆
     print(chat("帮我算一下 128 * 365 等于多少", "t2"))  # calculator 工具
+    print(chat("记住我在准备软件工程期末考试", "t1"))    # save_memory 工具
+    print(chat("把刚才的回答整理成笔记保存", "t1"))      # save_note 工具

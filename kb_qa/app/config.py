@@ -7,6 +7,10 @@ load_dotenv(os.path.join(BASE_DIR,".env"))
 #    Chroma 持久化目录、上传目录、提示——用 os.path 拼相对路径
 CHROMA_DIR = os.path.join(BASE_DIR,"chroma_db")
 UPLOADS_DIR = os.path.join(BASE_DIR,"uploads")
+#    长期记忆/成果文件/日志目录（大作业：JSON 记忆、outputs 成果文件、logs 运行日志）
+DATA_DIR = os.path.join(BASE_DIR, "data")
+OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
 
 # 3. 模型配置：四个常量
 #    CHAT_MODEL / EMBEDDING_MODEL / TEMPERATURE / 检索的 K 值

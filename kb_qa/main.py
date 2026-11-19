@@ -23,7 +23,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import agent, auth, db, kb
+from app import agent, auth, db, kb, memory
 from app.config import BASE_DIR, UPLOADS_DIR
 
 # 网页前端目录（index.html 登录页 / docs.html 文档管理 / chat.html 提问）
@@ -136,14 +136,28 @@ def _cited_sources(answer: str) -> list:
 
 @api.post("/chat", response_model=ChatResponse)
 def chat_api(request: Request, req: ChatRequest) -> ChatResponse:
-    """收问题 → 调 Agent → 回答案。session_id 区分不同用户的会话。"""
+    """收问题 → 调 Agent → 回答案。session_id 区分不同用户的会话。
+    长期记忆按用户注入：Agent 能"记得"该用户以前的偏好/进度（重启不丢）。"""
     check_rate_limit(request)
     kb._clear_sources()  # 清空当前线程的上一问来源，防止串到这一问
+    username = require_user(request)
     session_id = resolve_session(request, req.session_id)
-    answer = agent.chat(req.question, session_id)
+    memory_text = memory.load_user_memory(username)
+    answer = agent.chat(req.question, session_id, username, memory_text)
     # 写入 MySQL：问题、答案、命中了哪些文档（互动看板靠它统计）
     db.add_qa_record(session_id, req.question, answer, json.dumps(kb.last_sources))
     return ChatResponse(answer=answer, sources=_cited_sources(answer))
+
+
+# ---- 接口1c：POST /kb/memory/clear 清除长期记忆 ----
+
+@api.post("/kb/memory/clear")
+def memory_clear_api(request: Request) -> dict:
+    """清除当前登录用户的全部长期记忆（偏好/进度）。
+    这是大作业要求的"长期记忆提供清除方法"——用户在页面点一下即可。"""
+    username = require_user(request)
+    removed = memory.clear_user_memory(username)
+    return {"message": "长期记忆已清空" if removed else "当前没有长期记忆"}
 
 
 # ---- 接口1b：POST /chat/stream 流式问答（SSE，前端打字机效果） ----
@@ -153,14 +167,16 @@ def chat_stream_api(request: Request, req: ChatRequest) -> StreamingResponse:
     """逐段推送 Agent 的原始 ReAct 输出（思考/行动/最终答案）。
     前端按"最终答案:"切分：之前的是思考过程，之后的进答案气泡。"""
     check_rate_limit(request)
+    username = require_user(request)
     session_id = resolve_session(request, req.session_id)
+    memory_text = memory.load_user_memory(username)
 
     def gen():
         # 注意：生成器跑在事件循环线程里，所以清空来源要放在这里（和 search 同线程），
         # 不能放在外面——外面是线程池线程，线程本地存储互不相通。
         kb._clear_sources()
         raw = ""
-        for chunk in agent.chat_stream(req.question, session_id):
+        for chunk in agent.chat_stream(req.question, session_id, username, memory_text):
             raw += chunk
             yield f"data: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
         # 流结束：把干净答案 + 命中来源写进 MySQL（互动看板用）；
@@ -389,7 +405,7 @@ def gradio_chat(message, history, session_id):
     """网页聊天回调：维护每人一份的 session_id，调 Agent 更新聊天记录。"""
     if session_id is None:  # 每个浏览器标签页第一次聊天时领一个编号
         session_id = uuid.uuid4().hex
-    answer = agent.chat(message, session_id)
+    answer = agent.chat(message, session_id, "gradio_user", memory.load_user_memory("gradio_user"))
     history = history + [
         {"role": "user", "content": message},
         {"role": "assistant", "content": answer},

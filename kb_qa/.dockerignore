@@ -8,6 +8,9 @@ __pycache__/
 venv/
 chroma_db/
 uploads/
+data/
+logs/
+outputs/
 
 # 版本控制与文档
 .git/

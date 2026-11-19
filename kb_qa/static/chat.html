@@ -39,6 +39,7 @@
     <div class="nav">
       <h1>💬 知识库提问</h1>
       <a href="docs.html">← 文档管理</a>
+      <a href="#" onclick="clearMemory()" id="mem-link">🧠 清除记忆</a>
     </div>
 
     <div id="chat">
@@ -54,6 +55,17 @@
 
 <script>
 if (!localStorage.getItem("kb_token")) location.href = "index.html";
+
+// 清除长期记忆（长期记忆=智能体记住的你的偏好/学习进度，重启不丢；清除后从头记）
+async function clearMemory() {
+  if (!confirm("确定清除智能体记住的你的长期记忆（偏好/进度）吗？")) return;
+  const r = await fetch("/kb/memory/clear", {
+    method: "POST",
+    headers: { "X-Token": localStorage.getItem("kb_token") },
+  });
+  const data = await r.json().catch(() => ({}));
+  alert(r.ok ? (data.message || "已清除") : "清除失败，请重新登录后重试");
+}
 
 // 会话编号：一个标签页一份，实现多轮记忆
 // 注意：crypto.randomUUID 只在 HTTPS/localhost 下可用，

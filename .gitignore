@@ -15,6 +15,11 @@ chroma_langchain_db/
 # 上传的用户文件（运行时自动生成）
 uploads/
 
+# 运行时产物：长期记忆 JSON、智能体日志、生成的笔记（目录用 .gitkeep 占位）
+kb_qa/data/
+kb_qa/logs/
+kb_qa/outputs/
+
 # 环境变量与密钥
 .env
 
