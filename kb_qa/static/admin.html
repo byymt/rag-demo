@@ -91,6 +91,8 @@ function chk(r) {
     localStorage.removeItem("kb_token");
     localStorage.removeItem("kb_user");
     localStorage.removeItem("kb_admin");
+    if (r.status === 401) alert("登录已过期（服务器可能刚重启过），请重新登录");
+    else alert("需要管理员权限，请用管理员账号登录");
     location.href = "index.html";
   }
   return r;

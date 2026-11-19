@@ -121,6 +121,7 @@ async function send() {
     localStorage.removeItem("kb_token");
     localStorage.removeItem("kb_user");
     localStorage.removeItem("kb_admin");
+    alert("登录已过期（服务器可能刚重启过），请重新登录");
     location.href = "index.html";
     return;
   }
@@ -208,6 +209,7 @@ async function pollActivity() {
     localStorage.removeItem("kb_token");
     localStorage.removeItem("kb_user");
     localStorage.removeItem("kb_admin");
+    alert("登录已过期（服务器可能刚重启过），请重新登录");
     location.href = "index.html";
     return;
   }
