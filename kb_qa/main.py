@@ -325,8 +325,9 @@ def list_docs_api(request: Request) -> dict:
 
 @api.put("/kb/docs/{doc_id}")
 def update_doc_name_api(doc_id: int, req: dict, request: Request) -> dict:
-    """修改文档文件名。只能改自己上传的。"""
-    username = require_user(request)
+    """修改文档文件名。仅管理员可改：文件名是检索来源标注的一部分，
+    随意改动会让其他用户的问答引用对不上，与删除同权限级别。"""
+    require_admin(request)
     new_name = req.get("filename", "").strip()
     if not new_name:
         raise HTTPException(status_code=400, detail="新文件名不能为空")
@@ -334,8 +335,6 @@ def update_doc_name_api(doc_id: int, req: dict, request: Request) -> dict:
     row = db.get_document(doc_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"文档不存在: id={doc_id}")
-    if row["uploader"] != username:
-        raise HTTPException(status_code=403, detail="只能修改自己上传的文档")
 
     ok = db.update_document_name(doc_id, new_name)
     return {"updated": doc_id, "old_name": row["filename"], "new_name": new_name}
@@ -345,16 +344,15 @@ def update_doc_name_api(doc_id: int, req: dict, request: Request) -> dict:
 
 @api.delete("/kb/docs/{doc_id}")
 def delete_doc_api(doc_id: int, request: Request) -> dict:
-    """删文档 = Chroma 删切片 + 删物理文件 + MySQL 删记录，三处一起删。只能删自己上传的。
+    """删文档 = Chroma 删切片 + 删物理文件 + MySQL 删记录，三处一起删。
+    仅管理员可删：知识库是公共资源，文档入库后别人的问答历史和看板都引用它，
+    上传者自行删除会破坏引用；且与审核流一致——普通用户只有"提交"权，没有"下架"权。
     每步用 try-except 包住，某步失败不影响其他步，尽量保证一致性。"""
-    username = require_user(request)
+    require_admin(request)
 
     row = db.get_document(doc_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"文档不存在: id={doc_id}")
-    # 普通用户只能删自己的；管理员可以删任何人的（治理污染文档的权限）
-    if row["uploader"] != username and not auth.is_admin(username):
-        raise HTTPException(status_code=403, detail="只能删除自己上传的文档")
 
     # 1. 删 Chroma 向量切片（靠上传时存下的 chroma_ids）
     try:

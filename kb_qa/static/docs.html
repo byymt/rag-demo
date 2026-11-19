@@ -124,7 +124,8 @@ async function load() {
   for (const d of docs) {
     const tr = document.createElement("tr");
     // 上传者本人或管理员都可以操作（后端会再独立校验一次权限）
-    const canManage = d.uploader === me || localStorage.getItem("kb_admin") === "1";
+    // 删除权限仅管理员：文档是公共资源，普通用户只有提交权（审核流），没有下架权
+    const canManage = localStorage.getItem("kb_admin") === "1";
     let actions = "";
     if (canManage) {
       if (currentEditingId === d.id) {
